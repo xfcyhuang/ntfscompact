@@ -9,12 +9,14 @@
 
 #include "cli.h"
 #include "detect.h"
+#include "uncompress.hpp"
 
 namespace ntfscompact {
 
 // 单文件报告：干跑输出的数据源
 struct FileReport {
     std::wstring display_path;  // 显示路径（不含 \\?\ 前缀）
+    std::wstring long_path;
     Plan plan;                  // 将采取的动作（含跳过原因）
     bool has_state = false;     // false：遍历期即跳过（黑名单/≤4KB 等），无现状
     CurrentState state;         // has_state 时有效：现状压缩形态
@@ -95,7 +97,7 @@ void WriteUtf8(std::FILE* stream, const std::wstring& text);
 
 // 管线粘合：扫描 + 按选项输出（干跑/详细打每文件行，普通模式打汇总）。
 // 返回进程退出码：0 全部成功，1 部分失败。
-int RunPipeline(const Options& options, IDetector& detector, std::FILE* out,
-                std::FILE* err);
+int RunPipeline(const Options& options, IDetector& detector,
+                const UncompressFn& fn_uncompress, std::FILE* out, std::FILE* err);
 
 }  // namespace ntfscompact

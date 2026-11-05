@@ -36,5 +36,11 @@ int wmain(int argc, wchar_t** argv) {
         WriteUtf8(stderr, L"ntfscompact: " + load_error + L"\n");
         return 1;
     }
-    return RunPipeline(r.options, detector, stdout, stderr);
+    auto exp_uncompressor{make_real_uncompressor()};
+    if (!exp_uncompressor.has_value()) {
+        WriteUtf8(stderr, L"ntfscompact: " + exp_uncompressor.error() + L"\n");
+        return 1;
+    }
+    UncompressFn fn_uncompress{std::move(exp_uncompressor.value())};
+    return RunPipeline(r.options, detector, fn_uncompress, stdout, stderr);
 }

@@ -195,7 +195,7 @@ TEST_CASE("RunPipeline：干跑输出每文件行与汇总，退出码 0（无�
 
     std::FILE* out = std::tmpfile();
     REQUIRE(out != nullptr);
-    const int code = RunPipeline(opt, detector, out, out);
+    const int code = RunPipeline(opt, detector, UncompressFn{}, out, out);
     CHECK(code == 0);
 
     const std::wstring text = ReadAll(out);
@@ -218,7 +218,7 @@ TEST_CASE("RunPipeline：普通模式只打汇总，不打每文件行") {
     FakeDetector detector;
     std::FILE* out = std::tmpfile();
     REQUIRE(out != nullptr);
-    const int code = RunPipeline(opt, detector, out, out);
+    const int code = RunPipeline(opt, detector, UncompressFn{}, out, out);
     CHECK(code == 0);
 
     const std::wstring text = ReadAll(out);
@@ -242,7 +242,7 @@ TEST_CASE("RunPipeline：失败路径计入退出码 1，失败行照打") {
     std::FILE* err = std::tmpfile();
     REQUIRE(out != nullptr);
     REQUIRE(err != nullptr);
-    const int code = RunPipeline(opt, detector, out, err);
+    const int code = RunPipeline(opt, detector, UncompressFn{}, out, err);
     CHECK(code == 1);
 
     const std::wstring err_text = ReadAll(err);
@@ -262,7 +262,7 @@ TEST_CASE("RunPipeline：-q 静默不输出") {
     FakeDetector detector;
     std::FILE* out = std::tmpfile();
     REQUIRE(out != nullptr);
-    const int code = RunPipeline(opt, detector, out, out);
+    const int code = RunPipeline(opt, detector, UncompressFn{}, out, out);
     std::fclose(out);
     CHECK(code == 0);
     // 静默：输出为空（tmpfile 已关，code 即验证点；见实现直接返回）

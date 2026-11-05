@@ -37,6 +37,7 @@ PipelineResult RunScan(const Options& options, IDetector& detector) {
     for (const ScanItem& item : scan.items) {
         FileReport r;
         r.display_path = item.display_path;
+        r.long_path = item.long_path;
         const DetectionResult d = detector.Detect(item.long_path);
         if (!d.error.empty()) {
             r.error = d.error;
@@ -59,9 +60,25 @@ PipelineResult RunScan(const Options& options, IDetector& detector) {
     return result;
 }
 
-int RunPipeline(const Options& options, IDetector& detector, std::FILE* out,
-                std::FILE* err) {
-    const PipelineResult result = RunScan(options, detector);
+int RunPipeline(const Options& options, IDetector& detector,
+                const UncompressFn& fn_uncompress, std::FILE* out, std::FILE* err) {
+    PipelineResult result = RunScan(options, detector);
+    if (options.uncompress && !options.dry_run) {
+        for (FileReport& r : result.reports) {
+            if (!r.error.empty() || r.plan.action != Plan::Action::Uncompress) continue;
+            if (!fn_uncompress) {
+                r.error = L"解压器未接线";
+                ++result.failures;
+                continue;
+            }
+            const std::expected<void, std::wstring> exp{
+                fn_uncompress(r.long_path)};
+            if (!exp.has_value()) {
+                r.error = exp.error();
+                ++result.failures;
+            }
+        }
+    }
     if (!options.quiet) {
         if (options.dry_run || options.verbose) {
             for (const FileReport& r : result.reports) {
