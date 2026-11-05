@@ -21,6 +21,7 @@ struct FileReport {
   ExecuteResult er_exec{};
   std::vector<std::wstring> vec_released{};
   std::uint64_t u8_logical_size{0};
+  std::uint64_t u8_disk_size{0};
 };
 
 struct PipelineResult {
@@ -53,15 +54,27 @@ inline std::wstring format_report_line_core(const FileReport& fr_report,
   str_line += fr_report.str_display_path;
   str_line += L"：";
   if (fr_report.b_executed) {
+    if (opt_options.b_verbose && fr_report.b_has_state) {
+      str_line += L"现状 " + describe_state(fr_report.cs_state) + L"，";
+    }
     switch (fr_report.er_exec.e_outcome) {
       case ExecuteResult::Outcome::kSuccess:
         if (fr_report.pl_plan.e_action == Plan::Action::kUncompress) {
           str_line += L"已解压";
+          if (opt_options.b_verbose) {
+            str_line += std::format(L"（{} 字节）",
+                                    fr_report.u8_logical_size);
+          }
         } else {
           str_line += fr_report.pl_plan.e_action == Plan::Action::kCompress
                           ? L"已压缩为指定算法 "
                           : L"已重压为指定算法 ";
           str_line += algorithm_name(opt_options.e_algorithm);
+          if (opt_options.b_verbose) {
+            str_line += std::format(L"（{} → {} 字节）",
+                                    fr_report.u8_logical_size,
+                                    fr_report.u8_disk_size);
+          }
         }
         break;
       case ExecuteResult::Outcome::kSkipped:
@@ -89,6 +102,10 @@ inline std::wstring format_report_line_core(const FileReport& fr_report,
     case Plan::Action::kSkip:
       str_line += fr_report.pl_plan.str_reason;
       break;
+  }
+  if (opt_options.b_verbose && opt_options.b_dry_run &&
+      fr_report.pl_plan.e_action != Plan::Action::kSkip) {
+    str_line += std::format(L"（{} 字节）", fr_report.u8_logical_size);
   }
   return str_line;
 }

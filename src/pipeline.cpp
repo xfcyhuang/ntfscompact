@@ -94,13 +94,14 @@ bool report_is_failure(const FileReport& fr_report) {
 void collect_byte_stats(PipelineResult& pl_result) {
   pl_result.u8_compressed_original = 0;
   pl_result.u8_compressed_disk = 0;
-  for (const FileReport& fr_report : pl_result.vec_reports) {
+  for (FileReport& fr_report : pl_result.vec_reports) {
     if (!counted_as_compressed(fr_report)) {
       continue;
     }
-    pl_result.u8_compressed_original += fr_report.u8_logical_size;
-    pl_result.u8_compressed_disk +=
+    fr_report.u8_disk_size =
         query_disk_usage(fr_report.str_long_path, fr_report.u8_logical_size);
+    pl_result.u8_compressed_original += fr_report.u8_logical_size;
+    pl_result.u8_compressed_disk += fr_report.u8_disk_size;
   }
 }
 
