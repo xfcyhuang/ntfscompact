@@ -1,0 +1,3 @@
+# 占用释放四级链与 --dismount 极端开关
+
+文件被占用时按升级链逐级释放：⓪ Oplock 前置协商——OVERLAPPED 句柄请求 FSCTL_REQUEST_OPLOCK，短超时（2s）等待授予或锁中断完成，仅对参与 oplock 协议的持有者有效，属被动等待，超时即降级；① Restart Manager 优雅关（RmShutdown(0)）；② Restart Manager 强制关（RmForceShutdown）；③ 句柄强关——NtQuerySystemInformation 枚举系统句柄表，定位目标文件句柄，DuplicateHandle(DUPLICATE_CLOSE_SOURCE) 强关，带风险闸门：默认只关低风险占用者（索引器/杀毒临时句柄/自启辅助进程），explorer.exe、数据库/虚拟机/编辑器类有状态进程与系统关键进程默认跳过，`--force-close-all` 为显式逃生开关，被关 PID/进程名/句柄值经 -v 审计输出；系统/受保护进程以 PROCESS_DUP_HANDLE 打不开即自然止步；④ 关闭后重试压缩：递增退避（100/300/1000ms ×3–5），单文件总预算 5s；⑤ 仍占用则跳过报告，绝不 TerminateProcess。另设 --dismount 极端开关：链尽后经 FSCTL_DISMOUNT_VOLUME 卸载目标卷使全卷句柄失效后重试，默认关，需管理员权限与显式确认，仅限受控场景使用。管理员权限仅全系统句柄枚举、强关他人进程与 --dismount 需要；普通文件 WOF 压缩本身无需提升。本 ADR 取代 0002 的「两级+跳过」结论（0002 前两级保留为链中段）。
