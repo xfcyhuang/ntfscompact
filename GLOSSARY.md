@@ -17,7 +17,7 @@ _Avoid_: 转换、二次压缩
 _Avoid_: 忽略、放过
 
 **强制卸载（Forced Release）**:
-文件被占用时逐级释放占用以获得独占访问的操作：Restart Manager 优雅关、Restart Manager 强制关、句柄强关；可选 --dismount 卷卸载极端级。全部失败则跳过。
+文件被占用时直接卸载其所在卷使句柄失效、随后重试的操作。需管理员权限；失败或非提权则跳过。
 _Avoid_: 强杀、解锁
 
 **解压（Uncompress）**:
