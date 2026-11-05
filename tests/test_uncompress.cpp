@@ -232,6 +232,39 @@ TEST_CASE("uncompress_file：LZNT1 文件解压成功且内容不变") {
   CHECK(std::equal(vec_after.begin(), vec_after.end(), vec_before.begin()));
 }
 
+TEST_CASE("uncompress_file：只读属性文件解压成功且属性恢复") {
+  auto xe_detector{ntfscompact::make_real_detector()};
+  REQUIRE(xe_detector.has_value());
+  const ntfscompact::DetectFn fn_detect{std::move(xe_detector).value()};
+
+  ntfscompact_test::TempDir tmp{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp->b_ok);
+  const std::wstring str_file{ntfscompact_test::temp_sub(tmp, L"readonly.bin")};
+  REQUIRE(write_compressible(str_file));
+  auto xe_executor{ntfscompact::make_real_executor()};
+  REQUIRE(xe_executor.has_value());
+  const ntfscompact::ExecuteFn fn_execute{std::move(xe_executor).value()};
+  const ntfscompact::CurrentState cs_plain{};
+  const ntfscompact::ExecuteResult er_setup{
+      fn_execute(str_file, ntfscompact::Plan::Action::kCompress, cs_plain,
+                 ntfscompact::Algorithm::kLzx)};
+  REQUIRE_MESSAGE(er_setup.e_outcome == ntfscompact::ExecuteResult::Outcome::kSuccess,
+                  narrow(er_setup.str_message));
+  REQUIRE(fn_detect(str_file).cs_state.e_kind == CurrentState::Kind::kWof);
+  REQUIRE(SetFileAttributesW(ntfscompact_test::temp_long_api_path(str_file).c_str(),
+                             FILE_ATTRIBUTE_READONLY));
+
+  const std::expected<void, std::wstring> exp{uncompress_file(str_file, fn_detect)};
+  if (!exp.has_value()) {
+    const std::string str_err8{narrow(exp.error())};
+    MESSAGE(str_err8);
+  }
+  REQUIRE(exp.has_value());
+  CHECK(fn_detect(str_file).cs_state.e_kind == CurrentState::Kind::kNone);
+  CHECK((GetFileAttributesW(ntfscompact_test::temp_long_api_path(str_file).c_str()) &
+         FILE_ATTRIBUTE_READONLY) != 0);
+}
+
 TEST_CASE("uncompress_file：未压缩文件为无操作成功（幂等）") {
   auto xe_detector{ntfscompact::make_real_detector()};
   REQUIRE(xe_detector.has_value());

@@ -20,11 +20,14 @@ struct FileReport {
   bool b_executed{false};
   ExecuteResult er_exec{};
   std::vector<std::wstring> vec_released{};
+  std::uint64_t u8_logical_size{0};
 };
 
 struct PipelineResult {
   std::vector<FileReport> vec_reports{};
   int i4_failures{};
+  std::uint64_t u8_compressed_original{0};
+  std::uint64_t u8_compressed_disk{0};
 };
 
 inline std::wstring format_report_line_core(const FileReport& fr_report,
@@ -102,6 +105,18 @@ inline std::wstring format_report_line(const FileReport& fr_report,
   return str_line;
 }
 
+inline bool counted_as_compressed(const FileReport& fr_report) {
+  if (!fr_report.str_error.empty()) {
+    return false;
+  }
+  if (fr_report.b_executed &&
+      fr_report.er_exec.e_outcome != ExecuteResult::Outcome::kSuccess) {
+    return false;
+  }
+  return fr_report.pl_plan.e_action == Plan::Action::kCompress ||
+         fr_report.pl_plan.e_action == Plan::Action::kRecompress;
+}
+
 inline std::wstring format_summary(const PipelineResult& pl_result) {
   int i4_compress{0};
   int i4_recompress{0};
@@ -133,6 +148,16 @@ inline std::wstring format_summary(const PipelineResult& pl_result) {
   std::wstring str_line{std::format(L"共 {} 个文件：压缩 {}、重压 {}、解压 {}、跳过 {}",
                                     pl_result.vec_reports.size(), i4_compress,
                                     i4_recompress, i4_uncompress, i4_skip)};
+  if (i4_compress + i4_recompress > 0) {
+    const std::uint64_t u8_original{pl_result.u8_compressed_original};
+    const std::uint64_t u8_disk{pl_result.u8_compressed_disk};
+    const std::uint64_t u8_saved{u8_original > u8_disk ? u8_original - u8_disk
+                                                       : 0};
+    const std::uint64_t u8_percent{
+        u8_original > 0 ? u8_saved * 100 / u8_original : 0};
+    str_line += std::format(L"；压缩/重压 {} → {} 字节，节省 {}%", u8_original,
+                            u8_disk, u8_percent);
+  }
   if (pl_result.i4_failures > 0) {
     str_line += std::format(L"；失败 {}", pl_result.i4_failures);
   }
@@ -140,6 +165,8 @@ inline std::wstring format_summary(const PipelineResult& pl_result) {
 }
 
 PipelineResult run_scan(const Options& opt_options, const DetectFn& fn_detect);
+
+void collect_byte_stats(PipelineResult& pl_result);
 
 void write_utf8(std::FILE* f_stream, const std::wstring& str_text);
 

@@ -71,6 +71,37 @@ void append_released(std::vector<std::wstring>& vec_target,
   vec_target.insert(vec_target.end(), vec_extra.begin(), vec_extra.end());
 }
 
+std::uint64_t query_disk_usage(const std::wstring& str_long_path,
+                               std::uint64_t u8_fallback) {
+  DWORD u4_high{0};
+  SetLastError(ERROR_SUCCESS);
+  const DWORD u4_low{GetCompressedFileSizeW(str_long_path.c_str(), &u4_high)};
+  if (u4_low == INVALID_FILE_SIZE && GetLastError() != ERROR_SUCCESS) {
+    return u8_fallback;
+  }
+  return (static_cast<std::uint64_t>(u4_high) << 32) |
+         static_cast<std::uint64_t>(u4_low);
+}
+
+bool report_is_failure(const FileReport& fr_report) {
+  return !fr_report.str_error.empty() ||
+         (fr_report.b_executed &&
+          fr_report.er_exec.e_outcome == ExecuteResult::Outcome::kError);
+}
+
+}
+
+void collect_byte_stats(PipelineResult& pl_result) {
+  pl_result.u8_compressed_original = 0;
+  pl_result.u8_compressed_disk = 0;
+  for (const FileReport& fr_report : pl_result.vec_reports) {
+    if (!counted_as_compressed(fr_report)) {
+      continue;
+    }
+    pl_result.u8_compressed_original += fr_report.u8_logical_size;
+    pl_result.u8_compressed_disk +=
+        query_disk_usage(fr_report.str_long_path, fr_report.u8_logical_size);
+  }
 }
 
 PipelineResult run_scan(const Options& opt_options, const DetectFn& fn_detect) {
@@ -90,6 +121,7 @@ PipelineResult run_scan(const Options& opt_options, const DetectFn& fn_detect) {
     FileReport fr_report{};
     fr_report.str_display_path = si_item.str_display_path;
     fr_report.str_long_path = si_item.str_long_path;
+    fr_report.u8_logical_size = si_item.u8_size;
     const DetectionResult dr_detect{fn_detect(si_item.str_long_path)};
     if (!dr_detect.str_error.empty()) {
       fr_report.str_error = dr_detect.str_error;
@@ -194,20 +226,18 @@ int run_pipeline(const Options& opt_options, const DetectFn& fn_detect,
     }
   }
 
-  if (!opt_options.b_quiet) {
-    if (opt_options.b_dry_run || opt_options.b_verbose ||
-        !opt_options.b_uncompress) {
-      for (const FileReport& fr_report : pl_result.vec_reports) {
-        const bool b_to_err{
-            !fr_report.str_error.empty() ||
-            (fr_report.b_executed &&
-             fr_report.er_exec.e_outcome == ExecuteResult::Outcome::kError)};
-        write_utf8(b_to_err ? f_err : f_out,
-                   format_report_line(fr_report, opt_options) + L"\n");
-      }
+  collect_byte_stats(pl_result);
+
+  for (const FileReport& fr_report : pl_result.vec_reports) {
+    if (report_is_failure(fr_report)) {
+      write_utf8(f_err, format_report_line(fr_report, opt_options) + L"\n");
+    } else if (!opt_options.b_quiet &&
+               (opt_options.b_dry_run || opt_options.b_verbose ||
+                !opt_options.b_uncompress)) {
+      write_utf8(f_out, format_report_line(fr_report, opt_options) + L"\n");
     }
-    write_utf8(f_out, format_summary(pl_result) + L"\n");
   }
+  write_utf8(f_out, format_summary(pl_result) + L"\n");
   return pl_result.i4_failures > 0 ? 1 : 0;
 }
 

@@ -77,7 +77,7 @@ std::wstring usage_text() {
          L"  -a <算法>        指定算法：xpress4k | xpress8k | xpress16k | lzx（默认 xpress8k）\n"
          L"  -u               解压：解除压缩，恢复常规存储（与 -a 互斥）\n"
          L"  -n               干跑：只报告，不修改\n"
-         L"  -q               静默：不输出\n"
+         L"  -q               静默：仅输出末尾汇总一行（失败仍输出到 stderr）\n"
          L"  -v               详细输出（含卷卸载处置记录）\n"
          L"  --help           显示用法\n"
          L"  --version        显示版本\n"
