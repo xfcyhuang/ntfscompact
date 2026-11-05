@@ -5,6 +5,7 @@ import std;
 #include "cli.hpp"
 #include "detect.hpp"
 #include "executor.hpp"
+#include "release.hpp"
 #include "uncompress.hpp"
 
 namespace ntfscompact {
@@ -18,6 +19,7 @@ struct FileReport {
   std::wstring str_error{};
   bool b_executed{false};
   ExecuteResult er_exec{};
+  std::vector<std::wstring> vec_released{};
 };
 
 struct PipelineResult {
@@ -25,8 +27,8 @@ struct PipelineResult {
   int i4_failures{};
 };
 
-inline std::wstring format_report_line(const FileReport& fr_report,
-                                       const Options& opt_options) {
+inline std::wstring format_report_line_core(const FileReport& fr_report,
+                                            const Options& opt_options) {
   if (!fr_report.str_error.empty()) {
     return L"[失败] " + fr_report.str_display_path + L"：" + fr_report.str_error;
   }
@@ -84,6 +86,22 @@ inline std::wstring format_report_line(const FileReport& fr_report,
   return str_line;
 }
 
+inline std::wstring format_report_line(const FileReport& fr_report,
+                                       const Options& opt_options) {
+  std::wstring str_line{format_report_line_core(fr_report, opt_options)};
+  if (opt_options.b_verbose && !fr_report.vec_released.empty()) {
+    str_line += L"；强制卸载：";
+    for (std::size_t u8_index{0}; u8_index < fr_report.vec_released.size();
+         ++u8_index) {
+      if (u8_index > 0) {
+        str_line += L"、";
+      }
+      str_line += fr_report.vec_released[u8_index];
+    }
+  }
+  return str_line;
+}
+
 inline std::wstring format_summary(const PipelineResult& pl_result) {
   int i4_compress{0};
   int i4_recompress{0};
@@ -127,7 +145,7 @@ void write_utf8(std::FILE* f_stream, const std::wstring& str_text);
 
 int run_pipeline(const Options& opt_options, const DetectFn& fn_detect,
                  const ExecuteFn& fn_execute,
-                 const UncompressFn& fn_uncompress, std::FILE* f_out,
-                 std::FILE* f_err);
+                 const UncompressFn& fn_uncompress, const ReleaseFn& fn_release,
+                 std::FILE* f_out, std::FILE* f_err);
 
 }

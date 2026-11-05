@@ -110,10 +110,11 @@ Algorithm from_wof_algorithm(ULONG u4_algorithm) {
   return Algorithm::kXpress8k;
 }
 
-ExecuteResult make_error(std::wstring str_message) {
+ExecuteResult make_error(std::wstring str_message, ULONG u4_error) {
   ExecuteResult er_result{};
   er_result.e_outcome = ExecuteResult::Outcome::kError;
   er_result.str_message = std::move(str_message);
+  er_result.u4_error = static_cast<unsigned int>(u4_error);
   return er_result;
 }
 
@@ -171,7 +172,8 @@ ExecuteResult compress_core(const ExecutorContext& ctx_execute,
   HandleGuard guard_file{open_file_for_compress(str_long_path)};
   if (!guard_file) {
     return make_error(
-        std::format(L"无法打开文件（错误码 {}）", GetLastError()));
+        std::format(L"无法打开文件（错误码 {}）", GetLastError()),
+        GetLastError());
   }
   if (e_action == Plan::Action::kRecompress) {
     if (cs_current.e_kind == CurrentState::Kind::kLznt1) {
@@ -182,7 +184,8 @@ ExecuteResult compress_core(const ExecutorContext& ctx_execute,
       if (!io_unback.b_ok) {
         return make_error(std::format(
             L"解除 LZNT1 压缩失败（FSCTL_SET_COMPRESSION 错误码 {}）",
-            io_unback.u4_error));
+            io_unback.u4_error),
+            io_unback.u4_error);
       }
     } else if (cs_current.e_kind == CurrentState::Kind::kWof) {
       const IoctlOutcome io_unback{ioctl_with_retry(
@@ -191,7 +194,8 @@ ExecuteResult compress_core(const ExecutorContext& ctx_execute,
           io_unback.u4_error != ERROR_OBJECT_NOT_EXTERNALLY_BACKED) {
         return make_error(std::format(
             L"解除 WOF 压缩失败（FSCTL_DELETE_EXTERNAL_BACKING 错误码 {}）",
-            io_unback.u4_error));
+            io_unback.u4_error),
+            io_unback.u4_error);
       }
     }
   }
@@ -213,7 +217,8 @@ ExecuteResult compress_core(const ExecutorContext& ctx_execute,
   }
   if (unpack_win32_error(u4_compress) != ERROR_SUCCESS) {
     return make_error(std::format(L"压缩失败（WofSetFileDataLocation 错误码 {}）",
-                                  u4_compress));
+                                  u4_compress),
+                      unpack_win32_error(u4_compress));
   }
   BOOL b_external{FALSE};
   ULONG u4_provider{};
@@ -224,13 +229,14 @@ ExecuteResult compress_core(const ExecutorContext& ctx_execute,
       &u4_info_len)};
   if (u4_verify != ERROR_SUCCESS) {
     return make_error(
-        std::format(L"复核失败（WofIsExternalFile 错误码 {}）", u4_verify));
+        std::format(L"复核失败（WofIsExternalFile 错误码 {}）", u4_verify),
+        u4_verify);
   }
   const std::wstring str_mismatch{check_compression_meets_target(
       b_external != FALSE, static_cast<int>(u4_provider),
       from_wof_algorithm(info_verified.u4_algorithm), e_target)};
   if (!str_mismatch.empty()) {
-    return make_error(str_mismatch);
+    return make_error(str_mismatch, 0);
   }
   return ExecuteResult{};
 }
@@ -240,19 +246,21 @@ ExecuteResult execute_one(const ExecutorContext& ctx_execute,
                           Plan::Action e_action,
                           const CurrentState& cs_current, Algorithm e_target) {
   if (e_action == Plan::Action::kUncompress || e_action == Plan::Action::kSkip) {
-    return make_error(L"解压执行段属工单 T4，未实现");
+    return make_error(L"解压执行段属工单 T4，未实现", 0);
   }
   const DWORD u4_attrs{GetFileAttributesW(str_long_path.c_str())};
   if (u4_attrs == INVALID_FILE_ATTRIBUTES) {
     return make_error(
-        std::format(L"无法读取文件属性（错误码 {}）", GetLastError()));
+        std::format(L"无法读取文件属性（错误码 {}）", GetLastError()),
+        GetLastError());
   }
   const bool b_readonly{(u4_attrs & FILE_ATTRIBUTE_READONLY) != 0};
   if (b_readonly &&
       !SetFileAttributesW(str_long_path.c_str(),
                           u4_attrs & ~FILE_ATTRIBUTE_READONLY)) {
     return make_error(
-        std::format(L"临时清除只读属性失败（错误码 {}）", GetLastError()));
+        std::format(L"临时清除只读属性失败（错误码 {}）", GetLastError()),
+        GetLastError());
   }
   ExecuteResult er_result{compress_core(ctx_execute, str_long_path, e_action,
                                         cs_current, e_target)};

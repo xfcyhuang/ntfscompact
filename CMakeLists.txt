@@ -11,7 +11,7 @@ add_compile_options(-Wall -Wextra -Wpedantic -Wno-reserved-module-identifier -ff
 add_link_options(-Wl,--gc-sections)
 
 # 解析层（及后续管线）作为静态库，供可执行文件与单元测试共用
-add_library(ntfscompact_core STATIC src/cli.cpp src/scan.cpp src/detector.cpp src/pipeline.cpp src/executor.cpp src/uncompress.cpp)
+add_library(ntfscompact_core STATIC src/cli.cpp src/scan.cpp src/detector.cpp src/pipeline.cpp src/executor.cpp src/uncompress.cpp src/release.cpp)
 target_include_directories(ntfscompact_core PUBLIC src)
 
 add_executable(ntfscompact src/main.cpp)
@@ -51,3 +51,10 @@ add_test(NAME pipeline_run COMMAND ntfscompact_run_tests)
 add_executable(ntfscompact_executor_tests tests/test_executor.cpp)
 target_link_libraries(ntfscompact_executor_tests PRIVATE ntfscompact_core)
 add_test(NAME executor_real COMMAND ntfscompact_executor_tests)
+
+add_executable(ntfscompact_release_tests tests/test_release.cpp)
+target_link_libraries(ntfscompact_release_tests PRIVATE ntfscompact_core)
+add_test(NAME release_real COMMAND ntfscompact_release_tests)
+
+get_property(NTFSCOMPACT_ALL_TESTS DIRECTORY PROPERTY TESTS)
+set_tests_properties(${NTFSCOMPACT_ALL_TESTS} PROPERTIES TIMEOUT 180)

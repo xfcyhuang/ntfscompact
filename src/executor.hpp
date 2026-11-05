@@ -11,6 +11,7 @@ struct ExecuteResult {
   enum class Outcome { kSuccess, kSkipped, kError };
   Outcome e_outcome{Outcome::kSuccess};
   std::wstring str_message;
+  unsigned int u4_error{0};
 };
 
 using ExecuteFn = std::function<ExecuteResult(const std::wstring& str_long_path,

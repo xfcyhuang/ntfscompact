@@ -31,6 +31,7 @@ inline void temp_remove_recursive(const std::wstring& str_long_dir) {
           !(fd_find.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
         temp_remove_recursive(str_child);
       } else {
+        SetFileAttributesW(str_child.c_str(), FILE_ATTRIBUTE_NORMAL);
         DeleteFileW(str_child.c_str());
         RemoveDirectoryW(str_child.c_str());
       }
@@ -59,15 +60,18 @@ using TempDir = std::unique_ptr<TempDirState, TempDirReleaser>;
     return TempDir{up_state.release()};
   }
   static unsigned u4_counter{};
-  const std::wstring str_tail{std::format(
-      L"ntfscompact-t3-{}-{}", static_cast<unsigned long>(GetCurrentProcessId()),
-      u4_counter++)};
-  up_state->str_dir = std::wstring(arr_base, u4_len) + str_tail;
-  if (!CreateDirectoryW(up_state->str_dir.c_str(), nullptr)) {
-    up_state->str_dir.clear();
-    return TempDir{up_state.release()};
+  for (int i4_attempt{0}; i4_attempt < 8; ++i4_attempt) {
+    const std::wstring str_tail{std::format(
+        L"ntfscompact-t3-{}-{}-{}",
+        static_cast<unsigned long>(GetCurrentProcessId()), u4_counter++,
+        static_cast<unsigned long>(GetTickCount()))};
+    up_state->str_dir = std::wstring(arr_base, u4_len) + str_tail;
+    if (CreateDirectoryW(up_state->str_dir.c_str(), nullptr)) {
+      up_state->b_ok = true;
+      return TempDir{up_state.release()};
+    }
   }
-  up_state->b_ok = true;
+  up_state->str_dir.clear();
   return TempDir{up_state.release()};
 }
 

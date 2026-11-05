@@ -19,6 +19,60 @@ void write_utf8(std::FILE* f_stream, const std::wstring& str_text) {
   std::print(f_stream, "{}", std::string_view{str_utf8});
 }
 
+namespace {
+
+constexpr unsigned int kWin32SharingViolation{32};
+
+struct ReleaseGate {
+  bool b_busy{false};
+  std::wstring str_busy_reason{};
+  std::vector<std::wstring> vec_released{};
+};
+
+ReleaseGate gate_release(const std::wstring& str_long_path,
+                         const ReleaseFn& fn_release) {
+  ReleaseGate gate_result{};
+  const ReleaseOutcome ro_release{fn_release(str_long_path)};
+  switch (ro_release.e_status) {
+    case ReleaseOutcome::Status::kFree:
+      break;
+    case ReleaseOutcome::Status::kReleased:
+      if (ro_release.b_dismounted) {
+        gate_result.vec_released.push_back(L"已卸载所在卷");
+      }
+      break;
+    case ReleaseOutcome::Status::kBusy:
+      gate_result.b_busy = true;
+      gate_result.str_busy_reason = ro_release.str_detail.empty()
+                                        ? std::wstring{L"占用不可释放"}
+                                        : ro_release.str_detail;
+      break;
+  }
+  return gate_result;
+}
+
+ReleaseGate ensure_released(const std::wstring& str_long_path,
+                            const ReleaseFn& fn_release) {
+  if (!fn_release || !probe_file_occupied(str_long_path)) {
+    return ReleaseGate{};
+  }
+  return gate_release(str_long_path, fn_release);
+}
+
+void mark_busy_skip(FileReport& fr_report, const std::wstring& str_reason) {
+  fr_report.b_executed = false;
+  fr_report.er_exec = ExecuteResult{};
+  fr_report.pl_plan.e_action = Plan::Action::kSkip;
+  fr_report.pl_plan.str_reason = str_reason;
+}
+
+void append_released(std::vector<std::wstring>& vec_target,
+                     const std::vector<std::wstring>& vec_extra) {
+  vec_target.insert(vec_target.end(), vec_extra.begin(), vec_extra.end());
+}
+
+}
+
 PipelineResult run_scan(const Options& opt_options, const DetectFn& fn_detect) {
   PipelineResult pl_result{};
   ScanOutcome so_scan{};
@@ -60,8 +114,8 @@ PipelineResult run_scan(const Options& opt_options, const DetectFn& fn_detect) {
 
 int run_pipeline(const Options& opt_options, const DetectFn& fn_detect,
                  const ExecuteFn& fn_execute,
-                 const UncompressFn& fn_uncompress, std::FILE* f_out,
-                 std::FILE* f_err) {
+                 const UncompressFn& fn_uncompress, const ReleaseFn& fn_release,
+                 std::FILE* f_out, std::FILE* f_err) {
   PipelineResult pl_result{run_scan(opt_options, fn_detect)};
 
   if (!opt_options.b_dry_run) {
@@ -69,21 +123,63 @@ int run_pipeline(const Options& opt_options, const DetectFn& fn_detect,
       if (!fr_report.str_error.empty()) continue;
       switch (fr_report.pl_plan.e_action) {
         case Plan::Action::kCompress:
-        case Plan::Action::kRecompress:
-          fr_report.er_exec =
-              fn_execute(fr_report.str_long_path, fr_report.pl_plan.e_action,
-                         fr_report.cs_state, opt_options.e_algorithm);
-          fr_report.b_executed = true;
-          if (fr_report.er_exec.e_outcome == ExecuteResult::Outcome::kError) {
+        case Plan::Action::kRecompress: {
+          ReleaseGate gate_ensure{
+              ensure_released(fr_report.str_long_path, fn_release)};
+          if (!gate_ensure.b_busy) {
+            append_released(fr_report.vec_released, gate_ensure.vec_released);
+            fr_report.er_exec =
+                fn_execute(fr_report.str_long_path,
+                           fr_report.pl_plan.e_action, fr_report.cs_state,
+                           opt_options.e_algorithm);
+            fr_report.b_executed = true;
+            if (fn_release && fr_report.b_executed &&
+                fr_report.er_exec.e_outcome ==
+                    ExecuteResult::Outcome::kError &&
+                fr_report.er_exec.u4_error == kWin32SharingViolation) {
+              ReleaseGate gate_retry{
+                  gate_release(fr_report.str_long_path, fn_release)};
+              if (gate_retry.b_busy) {
+                mark_busy_skip(fr_report, gate_retry.str_busy_reason);
+              } else {
+                append_released(fr_report.vec_released,
+                                gate_retry.vec_released);
+                fr_report.er_exec =
+                    fn_execute(fr_report.str_long_path,
+                               fr_report.pl_plan.e_action,
+                               fr_report.cs_state,
+                               opt_options.e_algorithm);
+                if (fr_report.er_exec.e_outcome ==
+                        ExecuteResult::Outcome::kError &&
+                    fr_report.er_exec.u4_error == kWin32SharingViolation) {
+                  mark_busy_skip(
+                      fr_report,
+                      L"占用不可释放：卷卸载后重试执行仍报占用（错误码 32）");
+                }
+              }
+            }
+          } else {
+            mark_busy_skip(fr_report, gate_ensure.str_busy_reason);
+          }
+          if (fr_report.b_executed &&
+              fr_report.er_exec.e_outcome == ExecuteResult::Outcome::kError) {
             ++pl_result.i4_failures;
           }
           break;
+        }
         case Plan::Action::kUncompress: {
           if (!fn_uncompress) {
             fr_report.str_error = L"解压器未接线";
             ++pl_result.i4_failures;
             break;
           }
+          ReleaseGate gate_ensure{
+              ensure_released(fr_report.str_long_path, fn_release)};
+          if (gate_ensure.b_busy) {
+            mark_busy_skip(fr_report, gate_ensure.str_busy_reason);
+            break;
+          }
+          append_released(fr_report.vec_released, gate_ensure.vec_released);
           const std::expected<void, std::wstring> xe_uncompress{
               fn_uncompress(fr_report.str_long_path)};
           if (!xe_uncompress.has_value()) {
