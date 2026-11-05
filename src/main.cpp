@@ -23,11 +23,13 @@ int wmain(int argc, wchar_t** argv) {
   }
 
   std::wstring str_detector_error{};
-  RealDetector detector_real{&str_detector_error};
-  if (!str_detector_error.empty()) {
+  auto xe_detector{make_real_detector()};
+  if (!xe_detector.has_value()) {
+    str_detector_error = std::move(xe_detector).error();
     WriteUtf8(stderr, L"ntfscompact: " + str_detector_error + L"\n");
     return 1;
   }
+  DetectFn fn_detect{std::move(xe_detector).value()};
   ExecuteFn fn_execute{};
   if (!r.options.dry_run) {
     auto xe_executor{make_real_executor()};
@@ -43,6 +45,6 @@ int wmain(int argc, wchar_t** argv) {
     return 1;
   }
   UncompressFn fn_uncompress{std::move(xe_uncompressor.value())};
-  return RunPipeline(r.options, detector_real, fn_execute, fn_uncompress,
+  return RunPipeline(r.options, fn_detect, fn_execute, fn_uncompress,
                      stdout, stderr);
 }

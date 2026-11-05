@@ -19,7 +19,7 @@ void WriteUtf8(std::FILE* stream, const std::wstring& text) {
   std::fwrite(utf8.data(), 1, utf8.size(), stream);
 }
 
-PipelineResult RunScan(const Options& options, IDetector& detector) {
+PipelineResult RunScan(const Options& options, const DetectFn& fn_detect) {
   PipelineResult result;
   ScanOutcome scan;
   ScanPaths(options.paths, scan);
@@ -36,7 +36,7 @@ PipelineResult RunScan(const Options& options, IDetector& detector) {
     FileReport r;
     r.display_path = item.display_path;
     r.str_long_path = item.long_path;
-    const DetectionResult d = detector.Detect(item.long_path);
+    const DetectionResult d = fn_detect(item.long_path);
     if (!d.error.empty()) {
       r.error = d.error;
       ++result.failures;
@@ -58,10 +58,10 @@ PipelineResult RunScan(const Options& options, IDetector& detector) {
   return result;
 }
 
-int RunPipeline(const Options& options, IDetector& detector,
+int RunPipeline(const Options& options, const DetectFn& fn_detect,
                 const ExecuteFn& fn_execute, const UncompressFn& fn_uncompress,
                 std::FILE* out, std::FILE* err) {
-  PipelineResult result = RunScan(options, detector);
+  PipelineResult result = RunScan(options, fn_detect);
 
   if (!options.dry_run) {
     for (FileReport& fr_report : result.reports) {

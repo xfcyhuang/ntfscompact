@@ -19,7 +19,7 @@ struct WofFileCompressionInfoV1 {
     ULONG Flags;
 };
 
-using WofIsExternalFileFn = ULONG(WINAPI*)(LPCWSTR FilePath, PBOOL IsExternalFile,
+using WofIsExternalFilePtr = ULONG(WINAPI*)(LPCWSTR FilePath, PBOOL IsExternalFile,
                                            PULONG Provider,
                                            PVOID ExternalFileInfo,
                                            PULONG BufferLength);
@@ -44,62 +44,36 @@ Algorithm AlgorithmFromWof(ULONG algo) {
     }
 }
 
-}  // namespace
-
-struct RealDetector::Impl {
-    HMODULE wofutil = nullptr;
-    WofIsExternalFileFn is_external = nullptr;
+struct HmoduleReleaser {
+    void operator()(HMODULE h_module) const {
+        if (h_module != nullptr) {
+            FreeLibrary(h_module);
+        }
+    }
 };
 
-RealDetector::RealDetector(std::wstring* load_error) {
-    impl_ = new Impl;
-    impl_->wofutil = LoadLibraryW(L"wofutil.dll");
-    if (impl_->wofutil == nullptr) {
-        if (load_error != nullptr) {
-            *load_error = L"无法加载 wofutil.dll（错误码 " +
-                          std::to_wstring(GetLastError()) +
-                          L"）：WOF 现状检测不可用，工具终止。该 DLL 为 Windows "
-                          L"10+ 系统组件，请确认系统完整性。";
-        }
-        return;
-    }
-    impl_->is_external = reinterpret_cast<WofIsExternalFileFn>(
-        GetProcAddress(impl_->wofutil, "WofIsExternalFile"));
-    if (impl_->is_external == nullptr && load_error != nullptr) {
-        *load_error = L"wofutil.dll 中未找到 WofIsExternalFile 导出（错误码 " +
-                      std::to_wstring(GetLastError()) + L"）：无法检测 WOF 现状。";
-    }
-}
+using HmoduleGuard =
+    std::unique_ptr<std::remove_pointer_t<HMODULE>, HmoduleReleaser>;
 
-RealDetector::~RealDetector() {
-    if (impl_ != nullptr) {
-        if (impl_->wofutil != nullptr) {
-            FreeLibrary(impl_->wofutil);
-        }
-        delete impl_;
-    }
-}
+struct DetectorContext {
+    HmoduleGuard guard_module{};
+    std::function<ULONG WINAPI(LPCWSTR, PBOOL, PULONG, PVOID, PULONG)>
+        fn_is_external{};
+};
 
-DetectionResult RealDetector::Detect(const std::wstring& long_path) {
+// 检测一文件：先查 WOF backing（一步拿到 provider 与算法），非 WOF 再查传统压缩
+DetectionResult detect_with(const DetectorContext& ctx,
+                            const std::wstring& long_path) {
     DetectionResult result;
-    if (impl_ == nullptr || impl_->wofutil == nullptr ||
-        impl_->is_external == nullptr) {
-        result.error = L"wofutil.dll 未加载，无法检测";
-        return result;
-    }
-
-    // 先查 WOF backing：一步拿到 provider 与算法
     BOOL is_external = FALSE;
     ULONG provider = 0;
     WofFileCompressionInfoV1 info{};
     ULONG info_len = sizeof(info);
-    const ULONG err =
-        impl_->is_external(long_path.c_str(), &is_external, &provider, &info,
-                           &info_len);
+    const ULONG err = ctx.fn_is_external(long_path.c_str(), &is_external,
+                                         &provider, &info, &info_len);
     if (err != ERROR_SUCCESS) {
         // 目录/特殊路径会拒绝访问（探针实测 0x80070005）——按检测失败处理
-        result.error = L"现状检测失败（WofIsExternalFile 错误码 " +
-                       std::to_wstring(err) + L"）";
+        result.error = std::format(L"现状检测失败（WofIsExternalFile 错误码 {}）", err);
         return result;
     }
     if (is_external) {
@@ -108,15 +82,12 @@ DetectionResult RealDetector::Detect(const std::wstring& long_path) {
         result.state.algorithm = AlgorithmFromWof(info.Algorithm);
         return result;
     }
-
-    // 非 WOF：查传统 NTFS 压缩（LZNT1）
     HANDLE handle = CreateFileW(long_path.c_str(), FILE_READ_ATTRIBUTES,
                                 FILE_SHARE_READ | FILE_SHARE_WRITE |
                                     FILE_SHARE_DELETE,
                                 nullptr, OPEN_EXISTING, 0, nullptr);
     if (handle == INVALID_HANDLE_VALUE) {
-        result.error = L"无法打开文件（错误码 " +
-                       std::to_wstring(GetLastError()) + L"）";
+        result.error = std::format(L"无法打开文件（错误码 {}）", GetLastError());
         return result;
     }
     USHORT format = kFormatNone;
@@ -125,8 +96,9 @@ DetectionResult RealDetector::Detect(const std::wstring& long_path) {
                                     &format, sizeof(format), &returned, nullptr);
     CloseHandle(handle);
     if (!ok) {
-        result.error = L"现状检测失败（FSCTL_GET_COMPRESSION 错误码 " +
-                       std::to_wstring(GetLastError()) + L"）";
+        result.error =
+            std::format(L"现状检测失败（FSCTL_GET_COMPRESSION 错误码 {}）",
+                        GetLastError());
         return result;
     }
     if (format != kFormatNone) {
@@ -135,6 +107,32 @@ DetectionResult RealDetector::Detect(const std::wstring& long_path) {
         result.state.kind = CurrentState::Kind::None;
     }
     return result;
+}
+
+}  // namespace
+
+auto make_real_detector() -> std::expected<DetectFn, std::wstring> {
+    HMODULE h_module{LoadLibraryW(L"wofutil.dll")};
+    if (h_module == nullptr) {
+        return std::unexpected(std::format(
+            L"无法加载 wofutil.dll（错误码 {}）：WOF 现状检测不可用，工具终止。"
+            L"该 DLL 为 Windows 10+ 系统组件，请确认系统完整性。",
+            GetLastError()));
+    }
+    HmoduleGuard guard_module{h_module};
+    FARPROC ptr_is{GetProcAddress(h_module, "WofIsExternalFile")};
+    if (ptr_is == nullptr) {
+        return std::unexpected(std::format(
+            L"wofutil.dll 中未找到 WofIsExternalFile 导出（错误码 {}）：无法检测 WOF 现状。",
+            GetLastError()));
+    }
+    auto sp_ctx{std::make_shared<DetectorContext>()};
+    sp_ctx->guard_module = std::move(guard_module);
+    sp_ctx->fn_is_external = reinterpret_cast<WofIsExternalFilePtr>(ptr_is);
+    return DetectFn{[sp_ctx = std::move(sp_ctx)](
+                        const std::wstring& str_long_path) {
+        return detect_with(*sp_ctx, str_long_path);
+    }};
 }
 
 }  // namespace ntfscompact

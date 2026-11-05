@@ -30,28 +30,13 @@ struct DetectionResult {
 };
 
 // 检测缝：给出文件的现状压缩形态。
-// 生产实现 RealDetector（wofutil.dll 动态加载 + FSCTL_GET_COMPRESSION）；
-// 单测注入假实现，不依赖真实压缩状态。
-class IDetector {
-public:
-    virtual ~IDetector() = default;
-    virtual DetectionResult Detect(const std::wstring& long_path) = 0;
-};
+// 生产实现 make_real_detector（wofutil.dll 动态加载 + FSCTL_GET_COMPRESSION）；
+// 单测注入假函数，不依赖真实压缩状态。
+using DetectFn = std::function<DetectionResult(const std::wstring& str_long_path)>;
 
-// 生产检测器。构造时动态加载 wofutil.dll；失败时 *load_error 非空且
-// Detect 一律返回错误——调用方应打印说明并终止（无法判 WOF 现状会误压）。
-class RealDetector final : public IDetector {
-public:
-    explicit RealDetector(std::wstring* load_error);
-    ~RealDetector() override;
-    RealDetector(const RealDetector&) = delete;
-    RealDetector& operator=(const RealDetector&) = delete;
-    DetectionResult Detect(const std::wstring& long_path) override;
-
-private:
-    struct Impl;
-    Impl* impl_ = nullptr;
-};
+// 生产检测器工厂。动态加载 wofutil.dll；失败时返回错误说明——
+// 调用方应打印说明并终止（无法判 WOF 现状会误压）。
+[[nodiscard]] auto make_real_detector() -> std::expected<DetectFn, std::wstring>;
 
 // 将采取的动作（GLOSSARY：压缩 / 重压 / 解压 / 跳过）
 struct Plan {

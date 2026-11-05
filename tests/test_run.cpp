@@ -14,7 +14,7 @@ using ntfscompact::DetectionResult;
 using ntfscompact::ExecuteFn;
 using ntfscompact::ExecuteResult;
 using ntfscompact::FileReport;
-using ntfscompact::IDetector;
+using ntfscompact::DetectFn;
 using ntfscompact::Options;
 using ntfscompact::PipelineResult;
 using ntfscompact::Plan;
@@ -22,9 +22,7 @@ using ntfscompact::RunPipeline;
 using ntfscompact::RunScan;
 using ntfscompact::UncompressFn;
 
-class FakeDetector final : public IDetector {
-public:
-  DetectionResult Detect(const std::wstring& str_long_path) override {
+DetectionResult fake_detect(const std::wstring& str_long_path) {
     DetectionResult dr_result{};
     if (str_long_path.find(L"failme.bin") != std::wstring::npos) {
       dr_result.error = L"现状检测失败（模拟）";
@@ -53,7 +51,6 @@ public:
     }
     return dr_result;
   }
-};
 
 struct ExecuteCall {
   std::wstring str_long_path;
@@ -140,8 +137,8 @@ TEST_CASE("RunScan：各现状文件得到正确动作（注入假检测器）")
 
   Options opt_case{compress_options()};
   opt_case.paths.push_back(str_dir);
-  FakeDetector detector_fake{};
-  const PipelineResult result{RunScan(opt_case, detector_fake)};
+  const DetectFn fn_detect{fake_detect};
+  const PipelineResult result{RunScan(opt_case, fn_detect)};
 
   REQUIRE(result.reports.size() == 8);
   CHECK(result.failures == 1);
@@ -199,8 +196,8 @@ TEST_CASE("RunScan：解压模式下各文件动作") {
   Options opt_case{};
   opt_case.uncompress = true;
   opt_case.paths.push_back(tmp_dir.path());
-  FakeDetector detector_fake{};
-  const PipelineResult result{RunScan(opt_case, detector_fake)};
+  const DetectFn fn_detect{fake_detect};
+  const PipelineResult result{RunScan(opt_case, fn_detect)};
 
   const FileReport* ptr_plain{find_report(result, L"plain.bin")};
   REQUIRE(ptr_plain != nullptr);
@@ -223,12 +220,12 @@ TEST_CASE("RunPipeline：干跑输出每文件计划行与汇总，不执行，�
   Options opt_case{compress_options()};
   opt_case.dry_run = true;
   opt_case.paths.push_back(tmp_dir.path());
-  FakeDetector detector_fake{};
+  const DetectFn fn_detect{fake_detect};
   ExecuteRecorder recorder{};
 
   std::FILE* f_out{std::tmpfile()};
   REQUIRE(f_out != nullptr);
-  const int i4_code{RunPipeline(opt_case, detector_fake, recorder.fn(),
+  const int i4_code{RunPipeline(opt_case, fn_detect, recorder.fn(),
                                 UncompressFn{}, f_out, f_out)};
   CHECK(i4_code == 0);
 
@@ -253,14 +250,14 @@ TEST_CASE("RunPipeline：真实模式执行压缩，每文件结果行与汇总�
 
   Options opt_case{compress_options()};
   opt_case.paths.push_back(tmp_dir.path());
-  FakeDetector detector_fake{};
+  const DetectFn fn_detect{fake_detect};
   ExecuteRecorder recorder{};
 
   std::FILE* f_out{std::tmpfile()};
   std::FILE* f_err{std::tmpfile()};
   REQUIRE(f_out != nullptr);
   REQUIRE(f_err != nullptr);
-  const int i4_code{RunPipeline(opt_case, detector_fake, recorder.fn(),
+  const int i4_code{RunPipeline(opt_case, fn_detect, recorder.fn(),
                                 UncompressFn{}, f_out, f_err)};
   CHECK(i4_code == 1);
 
@@ -289,11 +286,11 @@ TEST_CASE("RunPipeline：真实模式重压——LZNT1 与异算法 WOF 传 Reco
 
   Options opt_case{compress_options()};
   opt_case.paths.push_back(tmp_dir.path());
-  FakeDetector detector_fake{};
+  const DetectFn fn_detect{fake_detect};
   ExecuteRecorder recorder{};
   std::FILE* f_out{std::tmpfile()};
   REQUIRE(f_out != nullptr);
-  RunPipeline(opt_case, detector_fake, recorder.fn(), UncompressFn{}, f_out,
+  RunPipeline(opt_case, fn_detect, recorder.fn(), UncompressFn{}, f_out,
               f_out);
 
   const std::wstring str_text{read_all(f_out)};
@@ -315,13 +312,13 @@ TEST_CASE("RunPipeline：真实模式失败后继续跑完后续文件") {
 
   Options opt_case{compress_options()};
   opt_case.paths.push_back(tmp_dir.path());
-  FakeDetector detector_fake{};
+  const DetectFn fn_detect{fake_detect};
   ExecuteRecorder recorder{};
   std::FILE* f_out{std::tmpfile()};
   std::FILE* f_err{std::tmpfile()};
   REQUIRE(f_out != nullptr);
   REQUIRE(f_err != nullptr);
-  RunPipeline(opt_case, detector_fake, recorder.fn(), UncompressFn{}, f_out,
+  RunPipeline(opt_case, fn_detect, recorder.fn(), UncompressFn{}, f_out,
               f_err);
 
   CHECK(recorder.vec_calls.size() == 2);
@@ -341,7 +338,7 @@ TEST_CASE("RunPipeline：Skip 与解压分支分派解压执行器，不碰压�
   Options opt_case{compress_options()};
   opt_case.uncompress = true;
   opt_case.paths.push_back(tmp_dir.path());
-  FakeDetector detector_fake{};
+  const DetectFn fn_detect{fake_detect};
   ExecuteRecorder recorder{};
   std::vector<std::wstring> vec_uncompress_calls{};
   const UncompressFn fn_uncompress{
@@ -352,7 +349,7 @@ TEST_CASE("RunPipeline：Skip 与解压分支分派解压执行器，不碰压�
       }};
   std::FILE* f_out{std::tmpfile()};
   REQUIRE(f_out != nullptr);
-  const int i4_code{RunPipeline(opt_case, detector_fake, recorder.fn(),
+  const int i4_code{RunPipeline(opt_case, fn_detect, recorder.fn(),
                                 fn_uncompress, f_out, f_out)};
   CHECK(i4_code == 0);
   std::fclose(f_out);
@@ -376,11 +373,11 @@ TEST_CASE("RunPipeline：普通模式输出每文件结果行与汇总") {
 
   Options opt_case{compress_options()};
   opt_case.paths.push_back(tmp_dir.path());
-  FakeDetector detector_fake{};
+  const DetectFn fn_detect{fake_detect};
   ExecuteRecorder recorder{};
   std::FILE* f_out{std::tmpfile()};
   REQUIRE(f_out != nullptr);
-  const int i4_code{RunPipeline(opt_case, detector_fake, recorder.fn(),
+  const int i4_code{RunPipeline(opt_case, fn_detect, recorder.fn(),
                                 UncompressFn{}, f_out, f_out)};
   CHECK(i4_code == 0);
 
@@ -401,14 +398,14 @@ TEST_CASE("RunPipeline：失败路径计入退出码 1，失败行照打") {
   Options opt_case{compress_options()};
   opt_case.paths.push_back(tmp_dir.path());
   opt_case.paths.push_back(tmp_dir.Sub(L"ghost.bin"));
-  FakeDetector detector_fake{};
+  const DetectFn fn_detect{fake_detect};
   ExecuteRecorder recorder{};
 
   std::FILE* f_out{std::tmpfile()};
   std::FILE* f_err{std::tmpfile()};
   REQUIRE(f_out != nullptr);
   REQUIRE(f_err != nullptr);
-  const int i4_code{RunPipeline(opt_case, detector_fake, recorder.fn(),
+  const int i4_code{RunPipeline(opt_case, fn_detect, recorder.fn(),
                                 UncompressFn{}, f_out, f_err)};
   CHECK(i4_code == 1);
 
@@ -427,11 +424,11 @@ TEST_CASE("RunPipeline：-q 静默不输出") {
   Options opt_case{compress_options()};
   opt_case.quiet = true;
   opt_case.paths.push_back(tmp_dir.path());
-  FakeDetector detector_fake{};
+  const DetectFn fn_detect{fake_detect};
   ExecuteRecorder recorder{};
   std::FILE* f_out{std::tmpfile()};
   REQUIRE(f_out != nullptr);
-  const int i4_code{RunPipeline(opt_case, detector_fake, recorder.fn(),
+  const int i4_code{RunPipeline(opt_case, fn_detect, recorder.fn(),
                                 UncompressFn{}, f_out, f_out)};
   std::fclose(f_out);
   CHECK(i4_code == 0);

@@ -15,7 +15,8 @@ using ntfscompact::DetectionResult;
 using ntfscompact::ExecuteFn;
 using ntfscompact::ExecuteResult;
 using ntfscompact::Plan;
-using ntfscompact::RealDetector;
+using ntfscompact::DetectFn;
+using ntfscompact::make_real_detector;
 using ntfscompact::check_compression_meets_target;
 using ntfscompact::make_real_executor;
 
@@ -168,10 +169,10 @@ TEST_CASE("普通文件压缩后 WofIsExternalFile 报告指定算法") {
   CHECK(er_result.e_outcome == ExecuteResult::Outcome::kSuccess);
   CHECK(narrow(er_result.str_message).empty());
 
-  std::wstring str_detector_error{};
-  RealDetector detector_check{&str_detector_error};
-  REQUIRE(narrow(str_detector_error).empty());
-  const DetectionResult dr_verified{detector_check.Detect(tmp_dir.Sub(L"plain.bin"))};
+  auto xe_detector{make_real_detector()};
+  REQUIRE(xe_detector.has_value());
+  const DetectFn fn_detect{std::move(xe_detector).value()};
+  const DetectionResult dr_verified{fn_detect(tmp_dir.Sub(L"plain.bin"))};
   CHECK(narrow(dr_verified.error).empty());
   CHECK(dr_verified.state.kind == CurrentState::Kind::Wof);
   CHECK(dr_verified.state.provider == CurrentState::kProviderFile);
@@ -192,11 +193,11 @@ TEST_CASE("指定算法 lzx 时压缩终态为 lzx") {
                                             Algorithm::Lzx)};
   CHECK(er_result.e_outcome == ExecuteResult::Outcome::kSuccess);
 
-  std::wstring str_detector_error{};
-  RealDetector detector_check{&str_detector_error};
-  REQUIRE(narrow(str_detector_error).empty());
+  auto xe_detector{make_real_detector()};
+  REQUIRE(xe_detector.has_value());
+  const DetectFn fn_detect{std::move(xe_detector).value()};
   const DetectionResult dr_verified{
-      detector_check.Detect(tmp_dir.Sub(L"lzx_target.bin"))};
+      fn_detect(tmp_dir.Sub(L"lzx_target.bin"))};
   CHECK(dr_verified.state.kind == CurrentState::Kind::Wof);
   CHECK(dr_verified.state.algorithm == Algorithm::Lzx);
 }
@@ -219,10 +220,10 @@ TEST_CASE("LZNT1 文件重压后终态为指定算法") {
   CHECK_MESSAGE(er_result.e_outcome == ExecuteResult::Outcome::kSuccess,
                 narrow(er_result.str_message));
 
-  std::wstring str_detector_error{};
-  RealDetector detector_check{&str_detector_error};
-  REQUIRE(narrow(str_detector_error).empty());
-  const DetectionResult dr_verified{detector_check.Detect(tmp_dir.Sub(L"lznt1.bin"))};
+  auto xe_detector{make_real_detector()};
+  REQUIRE(xe_detector.has_value());
+  const DetectFn fn_detect{std::move(xe_detector).value()};
+  const DetectionResult dr_verified{fn_detect(tmp_dir.Sub(L"lznt1.bin"))};
   CHECK(dr_verified.state.kind == CurrentState::Kind::Wof);
   CHECK(dr_verified.state.provider == CurrentState::kProviderFile);
   CHECK(dr_verified.state.algorithm == Algorithm::Xpress8k);
@@ -243,11 +244,11 @@ TEST_CASE("其他 WOF 算法文件重压后终态为指定算法") {
   REQUIRE_MESSAGE(er_setup.e_outcome == ExecuteResult::Outcome::kSuccess,
                   narrow(er_setup.str_message));
 
-  std::wstring str_detector_error{};
-  RealDetector detector_check{&str_detector_error};
-  REQUIRE(narrow(str_detector_error).empty());
+  auto xe_detector{make_real_detector()};
+  REQUIRE(xe_detector.has_value());
+  const DetectFn fn_detect{std::move(xe_detector).value()};
   const DetectionResult dr_setup{
-      detector_check.Detect(tmp_dir.Sub(L"woflzx.bin"))};
+      fn_detect(tmp_dir.Sub(L"woflzx.bin"))};
   REQUIRE(dr_setup.state.kind == CurrentState::Kind::Wof);
   REQUIRE(dr_setup.state.algorithm == Algorithm::Lzx);
 
@@ -262,7 +263,7 @@ TEST_CASE("其他 WOF 算法文件重压后终态为指定算法") {
                 narrow(er_result.str_message));
 
   const DetectionResult dr_verified{
-      detector_check.Detect(tmp_dir.Sub(L"woflzx.bin"))};
+      fn_detect(tmp_dir.Sub(L"woflzx.bin"))};
   CHECK(dr_verified.state.kind == CurrentState::Kind::Wof);
   CHECK(dr_verified.state.algorithm == Algorithm::Xpress8k);
 }
@@ -310,11 +311,11 @@ TEST_CASE("只读属性文件压缩成功且属性恢复") {
   CHECK(er_result.e_outcome == ExecuteResult::Outcome::kSuccess);
   CHECK((get_attrs(tmp_dir.Sub(L"readonly.bin")) & FILE_ATTRIBUTE_READONLY) != 0);
 
-  std::wstring str_detector_error{};
-  RealDetector detector_check{&str_detector_error};
-  REQUIRE(narrow(str_detector_error).empty());
+  auto xe_detector{make_real_detector()};
+  REQUIRE(xe_detector.has_value());
+  const DetectFn fn_detect{std::move(xe_detector).value()};
   const DetectionResult dr_verified{
-      detector_check.Detect(tmp_dir.Sub(L"readonly.bin"))};
+      fn_detect(tmp_dir.Sub(L"readonly.bin"))};
   CHECK(dr_verified.state.kind == CurrentState::Kind::Wof);
   CHECK(dr_verified.state.algorithm == Algorithm::Xpress8k);
 }

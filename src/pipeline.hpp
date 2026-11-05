@@ -115,11 +115,11 @@ inline std::wstring FormatSummary(const PipelineResult& result) {
   return line;
 }
 
-PipelineResult RunScan(const Options& options, IDetector& detector);
+PipelineResult RunScan(const Options& options, const DetectFn& fn_detect);
 
 void WriteUtf8(std::FILE* stream, const std::wstring& text);
 
-int RunPipeline(const Options& options, IDetector& detector,
+int RunPipeline(const Options& options, const DetectFn& fn_detect,
                 const ExecuteFn& fn_execute, const UncompressFn& fn_uncompress,
                 std::FILE* out, std::FILE* err);
 

@@ -70,9 +70,8 @@ DWORD GetAttrs(const std::wstring& path) {
 using namespace ntfscompact;
 
 TEST_CASE("RealDetector 构造：wofutil.dll 动态加载成功") {
-    std::wstring error;
-    RealDetector detector(&error);
-    REQUIRE(narrow(error) == "");  // 本机 Win10+ 必有 wofutil.dll
+    auto xe_detector{make_real_detector()};
+    REQUIRE(xe_detector.has_value());  // 本机 Win10+ 必有 wofutil.dll
 }
 
 TEST_CASE("RealDetector：普通文件 → 未压缩（None）") {
@@ -83,10 +82,10 @@ TEST_CASE("RealDetector：普通文件 → 未压缩（None）") {
     REQUIRE(RunCompact(L"/u \"" + tmp.Sub(L"plain.bin") + L"\"") == 0);
     REQUIRE((GetAttrs(tmp.Sub(L"plain.bin")) & FILE_ATTRIBUTE_COMPRESSED) == 0);
 
-    std::wstring error;
-    RealDetector detector(&error);
-    REQUIRE(narrow(error) == "");
-    const DetectionResult r = detector.Detect(tmp.Sub(L"plain.bin"));
+    auto xe_detector{make_real_detector()};
+    REQUIRE(xe_detector.has_value());
+    const DetectFn fn_detect{std::move(xe_detector).value()};
+    const DetectionResult r = fn_detect(tmp.Sub(L"plain.bin"));
     CHECK(narrow(r.error) == "");
     CHECK(r.state.kind == CurrentState::Kind::None);
 }
@@ -102,10 +101,10 @@ TEST_CASE("RealDetector：compact /c 造的 LZNT1 文件 → Lznt1") {
     const DWORD attrs = GetAttrs(tmp.Sub(L"lznt1.bin"));
     REQUIRE((attrs & FILE_ATTRIBUTE_COMPRESSED) != 0);
 
-    std::wstring error;
-    RealDetector detector(&error);
-    REQUIRE(narrow(error) == "");
-    const DetectionResult r = detector.Detect(tmp.Sub(L"lznt1.bin"));
+    auto xe_detector{make_real_detector()};
+    REQUIRE(xe_detector.has_value());
+    const DetectFn fn_detect{std::move(xe_detector).value()};
+    const DetectionResult r = fn_detect(tmp.Sub(L"lznt1.bin"));
     CHECK(narrow(r.error) == "");
     CHECK(r.state.kind == CurrentState::Kind::Lznt1);
 }
@@ -126,10 +125,10 @@ TEST_CASE("RealDetector：compact /exe:lzx 造的 WOF 文件 → Wof/lzx/Provide
         return;
     }
 
-    std::wstring error;
-    RealDetector detector(&error);
-    REQUIRE(narrow(error) == "");
-    const DetectionResult r = detector.Detect(tmp.Sub(L"wof.bin"));
+    auto xe_detector{make_real_detector()};
+    REQUIRE(xe_detector.has_value());
+    const DetectFn fn_detect{std::move(xe_detector).value()};
+    const DetectionResult r = fn_detect(tmp.Sub(L"wof.bin"));
     CHECK(narrow(r.error) == "");
     CHECK(r.state.kind == CurrentState::Kind::Wof);
     CHECK(r.state.provider == CurrentState::kProviderFile);
@@ -137,11 +136,11 @@ TEST_CASE("RealDetector：compact /exe:lzx 造的 WOF 文件 → Wof/lzx/Provide
 }
 
 TEST_CASE("RealDetector：不存在的路径 → 带错误的 DetectionResult") {
-    std::wstring error;
-    RealDetector detector(&error);
-    REQUIRE(narrow(error) == "");
+    auto xe_detector{make_real_detector()};
+    REQUIRE(xe_detector.has_value());
+    const DetectFn fn_detect{std::move(xe_detector).value()};
     const DetectionResult r =
-        detector.Detect(L"\\\\?\\D:\\Temp\\no-such-file-t3.bin");
+        fn_detect(L"\\\\?\\D:\\Temp\\no-such-file-t3.bin");
     CHECK_FALSE(r.error.empty());
 }
 
@@ -152,13 +151,13 @@ TEST_CASE("RealDetector：LZNT1 文件 compact /u 后 → None（状态可逆复
     REQUIRE(RunCompact(L"/u \"" + tmp.Sub(L"roundtrip.bin") + L"\"") == 0);  // 固定基线
     REQUIRE(RunCompact(L"/c \"" + tmp.Sub(L"roundtrip.bin") + L"\"") == 0);
 
-    std::wstring error;
-    RealDetector detector(&error);
-    REQUIRE(narrow(error) == "");
-    CHECK(detector.Detect(tmp.Sub(L"roundtrip.bin")).state.kind ==
+    auto xe_detector{make_real_detector()};
+    REQUIRE(xe_detector.has_value());
+    const DetectFn fn_detect{std::move(xe_detector).value()};
+    CHECK(fn_detect(tmp.Sub(L"roundtrip.bin")).state.kind ==
           CurrentState::Kind::Lznt1);
 
     REQUIRE(RunCompact(L"/u \"" + tmp.Sub(L"roundtrip.bin") + L"\"") == 0);
-    CHECK(detector.Detect(tmp.Sub(L"roundtrip.bin")).state.kind ==
+    CHECK(fn_detect(tmp.Sub(L"roundtrip.bin")).state.kind ==
           CurrentState::Kind::None);
 }
