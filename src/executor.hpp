@@ -10,7 +10,7 @@ namespace ntfscompact {
 struct ExecuteResult {
   enum class Outcome { kSuccess, kSkipped, kError };
   Outcome e_outcome{Outcome::kSuccess};
-  std::wstring str_message;
+  std::wstring str_message{};
   unsigned int u4_error{0};
 };
 
@@ -21,23 +21,22 @@ using ExecuteFn = std::function<ExecuteResult(const std::wstring& str_long_path,
 
 std::expected<ExecuteFn, std::wstring> make_real_executor();
 
-std::wstring check_compression_meets_target(bool b_is_external, int i4_provider,
-                                            Algorithm e_actual, Algorithm e_target);
+std::wstring check_compression_meets_target(const CurrentState& cs_actual,
+                                            Algorithm e_target);
 
-inline std::wstring check_compression_meets_target(bool b_is_external,
-                                                   int i4_provider,
-                                                   Algorithm e_actual,
+inline std::wstring check_compression_meets_target(const CurrentState& cs_actual,
                                                    Algorithm e_target) {
-  if (!b_is_external) {
+  if (cs_actual.e_kind != CurrentState::Kind::kWof) {
     return L"复核失败：压缩后文件未处于 WOF backing（可能被系统静默跳过）";
   }
-  if (i4_provider != CurrentState::kProviderFile) {
+  if (cs_actual.i4_provider != CurrentState::kProviderFile) {
     return std::format(L"复核失败：backing provider 为 {}（期望 WOF FILE）",
-                       i4_provider);
+                       cs_actual.i4_provider);
   }
-  if (e_actual != e_target) {
+  if (cs_actual.e_algorithm != e_target) {
     return std::format(L"复核失败：实际算法 {} ≠ 指定算法 {}",
-                       algorithm_name(e_actual), algorithm_name(e_target));
+                       algorithm_name(cs_actual.e_algorithm),
+                       algorithm_name(e_target));
   }
   return L"";
 }

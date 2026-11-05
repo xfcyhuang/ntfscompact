@@ -55,10 +55,14 @@ inline std::wstring format_report_line_core(const FileReport& fr_report,
   if (fr_report.b_executed) {
     switch (fr_report.er_exec.e_outcome) {
       case ExecuteResult::Outcome::kSuccess:
-        str_line += fr_report.pl_plan.e_action == Plan::Action::kCompress
-                        ? L"已压缩为指定算法 "
-                        : L"已重压为指定算法 ";
-        str_line += algorithm_name(opt_options.e_algorithm);
+        if (fr_report.pl_plan.e_action == Plan::Action::kUncompress) {
+          str_line += L"已解压";
+        } else {
+          str_line += fr_report.pl_plan.e_action == Plan::Action::kCompress
+                          ? L"已压缩为指定算法 "
+                          : L"已重压为指定算法 ";
+          str_line += algorithm_name(opt_options.e_algorithm);
+        }
         break;
       case ExecuteResult::Outcome::kSkipped:
         str_line += fr_report.er_exec.str_message;
@@ -117,7 +121,8 @@ inline bool counted_as_compressed(const FileReport& fr_report) {
          fr_report.pl_plan.e_action == Plan::Action::kRecompress;
 }
 
-inline std::wstring format_summary(const PipelineResult& pl_result) {
+inline std::wstring format_summary(const PipelineResult& pl_result,
+                                   const Options& opt_options) {
   int i4_compress{0};
   int i4_recompress{0};
   int i4_uncompress{0};
@@ -130,7 +135,8 @@ inline std::wstring format_summary(const PipelineResult& pl_result) {
           switch (fr_report.pl_plan.e_action) {
             case Plan::Action::kCompress: ++i4_compress; break;
             case Plan::Action::kRecompress: ++i4_recompress; break;
-            default: break;
+            case Plan::Action::kUncompress: ++i4_uncompress; break;
+            case Plan::Action::kSkip: break;
           }
           break;
         case ExecuteResult::Outcome::kSkipped: ++i4_skip; break;
@@ -148,7 +154,7 @@ inline std::wstring format_summary(const PipelineResult& pl_result) {
   std::wstring str_line{std::format(L"共 {} 个文件：压缩 {}、重压 {}、解压 {}、跳过 {}",
                                     pl_result.vec_reports.size(), i4_compress,
                                     i4_recompress, i4_uncompress, i4_skip)};
-  if (i4_compress + i4_recompress > 0) {
+  if (!opt_options.b_dry_run && i4_compress + i4_recompress > 0) {
     const std::uint64_t u8_original{pl_result.u8_compressed_original};
     const std::uint64_t u8_disk{pl_result.u8_compressed_disk};
     const std::uint64_t u8_saved{u8_original > u8_disk ? u8_original - u8_disk

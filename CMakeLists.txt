@@ -3,6 +3,10 @@ set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "451f2fe2-a8a2-47c3-bc32-94786d8fc91b")
 set(CMAKE_CXX_MODULE_STD 1)
 project(ntfscompact LANGUAGES CXX)
 
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 21)
+  message(FATAL_ERROR "ntfscompact 需要 Clang 21+（当前 ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}）")
+endif()
+
 set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -11,7 +15,7 @@ add_compile_options(-Wall -Wextra -Wpedantic -Wno-reserved-module-identifier -ff
 add_link_options(-Wl,--gc-sections)
 
 # 解析层（及后续管线）作为静态库，供可执行文件与单元测试共用
-add_library(ntfscompact_core STATIC src/cli.cpp src/scan.cpp src/detector.cpp src/pipeline.cpp src/executor.cpp src/uncompress.cpp src/release.cpp)
+add_library(ntfscompact_core STATIC src/cli.cpp src/scan.cpp src/detector.cpp src/pipeline.cpp src/executor.cpp src/uncompress.cpp src/release.cpp src/wof_util.cpp)
 target_include_directories(ntfscompact_core PUBLIC src)
 
 add_executable(ntfscompact src/main.cpp)

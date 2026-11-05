@@ -1,5 +1,8 @@
 #include "executor.hpp"
 
+#include "attr_guard.hpp"
+#include "wof_util.hpp"
+
 #include <windows.h>
 
 #ifndef FSCTL_SET_COMPRESSION
@@ -15,34 +18,9 @@
 namespace ntfscompact {
 namespace {
 
-constexpr ULONG kWofProviderFile{2};
-constexpr ULONG kWofAlgoXpress4k{0};
-constexpr ULONG kWofAlgoLzx{1};
-constexpr ULONG kWofAlgoXpress8k{2};
-constexpr ULONG kWofAlgoXpress16k{3};
 constexpr ULONG kHresultFacilityWin32{0x80070000U};
 constexpr int kTransientRetryMax{10};
 constexpr DWORD kTransientRetryDelayMs{50};
-
-struct WofFileCompressionInfoV1 {
-  ULONG u4_algorithm{};
-  ULONG u4_flags{};
-};
-
-using WofSetFileDataLocationPtr = ULONG(WINAPI*)(HANDLE, ULONG, PVOID, ULONG);
-using WofIsExternalFilePtr =
-    ULONG(WINAPI*)(LPCWSTR, PBOOL, PULONG, PVOID, PULONG);
-
-struct HmoduleReleaser {
-  void operator()(HMODULE h_module) const {
-    if (h_module != nullptr) {
-      FreeLibrary(h_module);
-    }
-  }
-};
-
-using HmoduleGuard =
-    std::unique_ptr<std::remove_pointer_t<HMODULE>, HmoduleReleaser>;
 
 struct HandleReleaser {
   void operator()(HANDLE h_file) const { CloseHandle(h_file); }
@@ -82,32 +60,15 @@ bool is_transient_win32_error(ULONG u4_error) {
   return false;
 }
 
-ULONG to_wof_algorithm(Algorithm e_algorithm) {
-  switch (e_algorithm) {
-    case Algorithm::kXpress4k:
-      return kWofAlgoXpress4k;
-    case Algorithm::kLzx:
-      return kWofAlgoLzx;
-    case Algorithm::kXpress8k:
-      return kWofAlgoXpress8k;
-    case Algorithm::kXpress16k:
-      return kWofAlgoXpress16k;
+ULONG retry_on_transient(const std::function<ULONG()>& fn_step) {
+  for (int i4_attempt{0};; ++i4_attempt) {
+    const ULONG u4_status{fn_step()};
+    if (i4_attempt >= kTransientRetryMax ||
+        !is_transient_win32_error(u4_status)) {
+      return u4_status;
+    }
+    Sleep(kTransientRetryDelayMs);
   }
-  return kWofAlgoXpress8k;
-}
-
-Algorithm from_wof_algorithm(ULONG u4_algorithm) {
-  switch (u4_algorithm) {
-    case kWofAlgoXpress4k:
-      return Algorithm::kXpress4k;
-    case kWofAlgoLzx:
-      return Algorithm::kLzx;
-    case kWofAlgoXpress8k:
-      return Algorithm::kXpress8k;
-    case kWofAlgoXpress16k:
-      return Algorithm::kXpress16k;
-  }
-  return Algorithm::kXpress8k;
 }
 
 ExecuteResult make_error(std::wstring str_message, ULONG u4_error) {
@@ -126,43 +87,32 @@ ExecuteResult make_skipped(std::wstring str_message) {
 }
 
 HandleGuard open_file_for_compress(const std::wstring& str_long_path) {
-  for (int i4_attempt{0};; ++i4_attempt) {
-    HandleGuard guard_file{CreateFileW(
+  HANDLE h_open{INVALID_HANDLE_VALUE};
+  retry_on_transient([&] {
+    h_open = CreateFileW(
         str_long_path.c_str(),
         GENERIC_READ | GENERIC_WRITE | FILE_READ_ATTRIBUTES,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
         OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_ATTRIBUTE_NORMAL,
-        nullptr)};
-    if (guard_file) {
-      return guard_file;
-    }
-    const DWORD u4_error{GetLastError()};
-    if (i4_attempt >= kTransientRetryMax ||
-        !is_transient_win32_error(u4_error)) {
-      return nullptr;
-    }
-    Sleep(kTransientRetryDelayMs);
+        nullptr);
+    return h_open != INVALID_HANDLE_VALUE ? 0 : GetLastError();
+  });
+  if (h_open == INVALID_HANDLE_VALUE) {
+    return HandleGuard{};
   }
+  return HandleGuard{h_open};
 }
 
 IoctlOutcome ioctl_with_retry(HANDLE h_file, DWORD u4_control, void* ptr_in,
                               DWORD u4_in_len) {
-  IoctlOutcome outcome{};
-  for (int i4_attempt{0};; ++i4_attempt) {
+  const ULONG u4_status{retry_on_transient([&] {
     DWORD u4_returned{};
-    outcome.b_ok = DeviceIoControl(h_file, u4_control, ptr_in, u4_in_len,
-                                   nullptr, 0, &u4_returned, nullptr) != 0;
-    if (outcome.b_ok) {
-      break;
-    }
-    outcome.u4_error = GetLastError();
-    if (i4_attempt >= kTransientRetryMax ||
-        !is_transient_win32_error(outcome.u4_error)) {
-      break;
-    }
-    Sleep(kTransientRetryDelayMs);
-  }
-  return outcome;
+    return DeviceIoControl(h_file, u4_control, ptr_in, u4_in_len, nullptr, 0,
+                           &u4_returned, nullptr) != 0
+               ? 0
+               : GetLastError();
+  })};
+  return IoctlOutcome{u4_status == 0, u4_status};
 }
 
 ExecuteResult compress_core(const ExecutorContext& ctx_execute,
@@ -201,16 +151,11 @@ ExecuteResult compress_core(const ExecutorContext& ctx_execute,
   }
   WofFileCompressionInfoV1 info_request{};
   info_request.u4_algorithm = to_wof_algorithm(e_target);
-  ULONG u4_compress{ERROR_SHARING_VIOLATION};
-  for (int i4_attempt{0};; ++i4_attempt) {
-    u4_compress = ctx_execute.fn_set_data_location(
-        guard_file.get(), kWofProviderFile, &info_request, sizeof(info_request));
-    if (i4_attempt >= kTransientRetryMax ||
-        !is_transient_win32_error(u4_compress)) {
-      break;
-    }
-    Sleep(kTransientRetryDelayMs);
-  }
+  const ULONG u4_compress{retry_on_transient([&] {
+    return ctx_execute.fn_set_data_location(
+        guard_file.get(), static_cast<ULONG>(CurrentState::kProviderFile),
+        &info_request, sizeof(info_request));
+  })};
   if (unpack_win32_error(u4_compress) ==
       static_cast<ULONG>(ERROR_COMPRESSION_NOT_BENEFICIAL)) {
     return make_skipped(L"无收益（内核判定压缩无容量收益），文件保持原样");
@@ -232,9 +177,13 @@ ExecuteResult compress_core(const ExecutorContext& ctx_execute,
         std::format(L"复核失败（WofIsExternalFile 错误码 {}）", u4_verify),
         u4_verify);
   }
-  const std::wstring str_mismatch{check_compression_meets_target(
-      b_external != FALSE, static_cast<int>(u4_provider),
-      from_wof_algorithm(info_verified.u4_algorithm), e_target)};
+  CurrentState cs_verified{};
+  cs_verified.e_kind = b_external != FALSE ? CurrentState::Kind::kWof
+                                           : CurrentState::Kind::kNone;
+  cs_verified.i4_provider = static_cast<int>(u4_provider);
+  cs_verified.e_algorithm = from_wof_algorithm(info_verified.u4_algorithm);
+  const std::wstring str_mismatch{
+      check_compression_meets_target(cs_verified, e_target)};
   if (!str_mismatch.empty()) {
     return make_error(str_mismatch, 0);
   }
@@ -245,31 +194,25 @@ ExecuteResult execute_one(const ExecutorContext& ctx_execute,
                           const std::wstring& str_long_path,
                           Plan::Action e_action,
                           const CurrentState& cs_current, Algorithm e_target) {
-  if (e_action == Plan::Action::kUncompress || e_action == Plan::Action::kSkip) {
-    return make_error(L"解压执行段属工单 T4，未实现", 0);
+  if (e_action != Plan::Action::kCompress &&
+      e_action != Plan::Action::kRecompress) {
+    return make_error(L"执行器仅受理压缩/重压动作（Skip/Uncompress 不经压缩执行器）", 0);
   }
-  const DWORD u4_attrs{GetFileAttributesW(str_long_path.c_str())};
-  if (u4_attrs == INVALID_FILE_ATTRIBUTES) {
-    return make_error(
-        std::format(L"无法读取文件属性（错误码 {}）", GetLastError()),
-        GetLastError());
+  auto xe_attr{begin_readonly_guard(str_long_path)};
+  if (!xe_attr.has_value()) {
+    const AttrFailure af_failure{std::move(xe_attr).error()};
+    return make_error(attr_failure_message(af_failure.e_stage,
+                                           af_failure.u4_error),
+                      af_failure.u4_error);
   }
-  const bool b_readonly{(u4_attrs & FILE_ATTRIBUTE_READONLY) != 0};
-  if (b_readonly &&
-      !SetFileAttributesW(str_long_path.c_str(),
-                          u4_attrs & ~FILE_ATTRIBUTE_READONLY)) {
-    return make_error(
-        std::format(L"临时清除只读属性失败（错误码 {}）", GetLastError()),
-        GetLastError());
-  }
+  const ReadonlyAttrState ra_attr{std::move(xe_attr).value()};
   ExecuteResult er_result{compress_core(ctx_execute, str_long_path, e_action,
                                         cs_current, e_target)};
-  if (b_readonly) {
-    if (!SetFileAttributesW(str_long_path.c_str(), u4_attrs)) {
-      er_result.e_outcome = ExecuteResult::Outcome::kError;
-      er_result.str_message += std::format(L"；恢复只读属性失败（错误码 {}）",
-                                           GetLastError());
-    }
+  AttrFailure af_restore{};
+  if (!end_readonly_guard(ra_attr, str_long_path, &af_restore)) {
+    er_result.e_outcome = ExecuteResult::Outcome::kError;
+    er_result.str_message +=
+        L"；" + attr_failure_message(af_restore.e_stage, af_restore.u4_error);
   }
   return er_result;
 }
@@ -277,15 +220,15 @@ ExecuteResult execute_one(const ExecutorContext& ctx_execute,
 }
 
 std::expected<ExecuteFn, std::wstring> make_real_executor() {
-  HMODULE h_module{LoadLibraryW(L"wofutil.dll")};
-  if (h_module == nullptr) {
+  auto xe_module{load_wofutil_module()};
+  if (!xe_module.has_value()) {
     return std::unexpected(std::format(
         L"无法加载 wofutil.dll（错误码 {}）：WOF 压缩不可用，工具终止",
-        GetLastError()));
+        std::move(xe_module).error()));
   }
-  HmoduleGuard guard_module{h_module};
-  FARPROC ptr_set{GetProcAddress(h_module, "WofSetFileDataLocation")};
-  FARPROC ptr_is{GetProcAddress(h_module, "WofIsExternalFile")};
+  HmoduleGuard guard_module{std::move(xe_module).value()};
+  FARPROC ptr_set{GetProcAddress(guard_module.get(), "WofSetFileDataLocation")};
+  FARPROC ptr_is{GetProcAddress(guard_module.get(), "WofIsExternalFile")};
   if (ptr_set == nullptr || ptr_is == nullptr) {
     return std::unexpected(std::format(
         L"wofutil.dll 缺少 WOF 压缩导出（错误码 {}）", GetLastError()));

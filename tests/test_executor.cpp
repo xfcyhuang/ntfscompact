@@ -3,6 +3,7 @@
 
 #include "executor.hpp"
 #include "temp_dir.hpp"
+#include "util.hpp"
 
 #include <cstdlib>
 #include <windows.h>
@@ -19,24 +20,8 @@ using ntfscompact::DetectFn;
 using ntfscompact::make_real_detector;
 using ntfscompact::check_compression_meets_target;
 using ntfscompact::make_real_executor;
-
-std::string narrow(const std::wstring& str_wide) {
-  const int i4_bytes{WideCharToMultiByte(CP_UTF8, 0, str_wide.data(),
-                                         static_cast<int>(str_wide.size()),
-                                         nullptr, 0, nullptr, nullptr)};
-  std::string str_utf8(static_cast<size_t>(i4_bytes), '\0');
-  if (i4_bytes > 0) {
-    WideCharToMultiByte(CP_UTF8, 0, str_wide.data(),
-                        static_cast<int>(str_wide.size()), str_utf8.data(),
-                        i4_bytes, nullptr, nullptr);
-  }
-  return str_utf8;
-}
-
-int run_compact(const std::wstring& str_args) {
-  const std::wstring str_cmd{L"compact " + str_args + L" >nul 2>&1"};
-  return _wsystem(str_cmd.c_str());
-}
+using ntfscompact_test::narrow;
+using ntfscompact_test::run_compact;
 
 bool write_compressible(const std::wstring& str_path) {
   HANDLE h_file{CreateFileW(ntfscompact_test::temp_long_api_path(str_path).c_str(),
@@ -118,30 +103,42 @@ bool has(const std::string& str_haystack, const char* ptr_needle) {
 }
 
 TEST_CASE("check_compression_meets_target：达到指定算法返回空串") {
-  CHECK(narrow(check_compression_meets_target(
-            true, CurrentState::kProviderFile, Algorithm::kXpress8k,
-            Algorithm::kXpress8k))
+  CurrentState cs_ok{};
+  cs_ok.e_kind = CurrentState::Kind::kWof;
+  cs_ok.i4_provider = CurrentState::kProviderFile;
+  cs_ok.e_algorithm = Algorithm::kXpress8k;
+  CHECK(narrow(check_compression_meets_target(cs_ok, Algorithm::kXpress8k))
             .empty());
-  CHECK(narrow(check_compression_meets_target(
-            true, CurrentState::kProviderFile, Algorithm::kLzx, Algorithm::kLzx))
+  cs_ok.e_algorithm = Algorithm::kLzx;
+  CHECK(narrow(check_compression_meets_target(cs_ok, Algorithm::kLzx))
             .empty());
 }
 
 TEST_CASE("check_compression_meets_target：静默未压缩报不符") {
-  const std::wstring str_msg{check_compression_meets_target(
-      false, 0, Algorithm::kXpress4k, Algorithm::kXpress8k)};
+  CurrentState cs_silent{};
+  cs_silent.e_algorithm = Algorithm::kXpress4k;
+  const std::wstring str_msg{
+      check_compression_meets_target(cs_silent, Algorithm::kXpress8k)};
   CHECK(has(narrow(str_msg), "复核失败"));
 }
 
 TEST_CASE("check_compression_meets_target：provider 非 WOF FILE 报不符") {
-  const std::wstring str_msg{check_compression_meets_target(
-      true, CurrentState::kProviderWim, Algorithm::kXpress8k, Algorithm::kXpress8k)};
+  CurrentState cs_wim{};
+  cs_wim.e_kind = CurrentState::Kind::kWof;
+  cs_wim.i4_provider = CurrentState::kProviderWim;
+  cs_wim.e_algorithm = Algorithm::kXpress8k;
+  const std::wstring str_msg{
+      check_compression_meets_target(cs_wim, Algorithm::kXpress8k)};
   CHECK(has(narrow(str_msg), "复核失败"));
 }
 
 TEST_CASE("check_compression_meets_target：算法不符报双方算法名") {
-  const std::wstring str_msg{check_compression_meets_target(
-      true, CurrentState::kProviderFile, Algorithm::kLzx, Algorithm::kXpress8k)};
+  CurrentState cs_mismatch{};
+  cs_mismatch.e_kind = CurrentState::Kind::kWof;
+  cs_mismatch.i4_provider = CurrentState::kProviderFile;
+  cs_mismatch.e_algorithm = Algorithm::kLzx;
+  const std::wstring str_msg{
+      check_compression_meets_target(cs_mismatch, Algorithm::kXpress8k)};
   const std::string str_narrow{narrow(str_msg)};
   CHECK(has(str_narrow, "复核失败"));
   CHECK(has(str_narrow, "lzx"));
@@ -341,7 +338,7 @@ TEST_CASE("被独占打开的文件计错误") {
   CHECK_FALSE(narrow(er_result.str_message).empty());
 }
 
-TEST_CASE("Uncompress 动作为未实现桩计错误") {
+TEST_CASE("Uncompress 动作分发到压缩执行器计错误") {
   auto xe_executor{make_real_executor()};
   REQUIRE(xe_executor.has_value());
   ExecuteFn fn_execute{std::move(xe_executor.value())};
@@ -351,5 +348,5 @@ TEST_CASE("Uncompress 动作为未实现桩计错误") {
                                             Plan::Action::kUncompress, cs_wof,
                                             Algorithm::kXpress8k)};
   CHECK(er_result.e_outcome == ExecuteResult::Outcome::kError);
-  CHECK(has(narrow(er_result.str_message), "未实现"));
+  CHECK(has(narrow(er_result.str_message), "执行器仅受理"));
 }

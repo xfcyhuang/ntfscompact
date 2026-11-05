@@ -2,6 +2,8 @@ import std;
 
 #include "uncompress.hpp"
 
+#include "attr_guard.hpp"
+
 #include <windows.h>
 #include <winioctl.h>
 
@@ -59,29 +61,28 @@ auto uncompress_file(const std::wstring& str_long_path,
       st_before.cs_state.i4_provider != CurrentState::kProviderFile) {
     return std::unexpected(L"WIM/Cloud backing 文件不解除（黑名单）");
   }
-  const DWORD u4_attrs{GetFileAttributesW(str_long_path.c_str())};
-  if (u4_attrs == INVALID_FILE_ATTRIBUTES) {
-    return std::unexpected(std::format(L"无法读取文件属性（错误码 {}）", GetLastError()));
+  auto xe_attr{begin_readonly_guard(str_long_path)};
+  if (!xe_attr.has_value()) {
+    const AttrFailure af_failure{std::move(xe_attr).error()};
+    return std::unexpected(attr_failure_message(af_failure.e_stage,
+                                                af_failure.u4_error));
   }
-  const bool b_readonly{(u4_attrs & FILE_ATTRIBUTE_READONLY) != 0};
-  if (b_readonly &&
-      !SetFileAttributesW(str_long_path.c_str(), u4_attrs & ~FILE_ATTRIBUTE_READONLY)) {
-    return std::unexpected(std::format(L"临时清除只读属性失败（错误码 {}）", GetLastError()));
-  }
+  const ReadonlyAttrState ra_attr{std::move(xe_attr).value()};
   HandlePtr ptr_file{open_read_write(str_long_path)};
   if (ptr_file.get() == INVALID_HANDLE_VALUE) {
     const DWORD u4_open_err{GetLastError()};
-    if (b_readonly) {
-      SetFileAttributesW(str_long_path.c_str(), u4_attrs);
-    }
+    AttrFailure af_restore{};
+    end_readonly_guard(ra_attr, str_long_path, &af_restore);
     return std::unexpected(std::format(L"无法以读写访问打开文件（错误码 {}）", u4_open_err));
   }
   const DWORD u4_ioctl_err{st_before.cs_state.e_kind == CurrentState::Kind::kWof
                                ? run_delete_backing(ptr_file.get())
                                : run_clear_lznt1(ptr_file.get())};
   ptr_file.reset();
-  if (b_readonly && !SetFileAttributesW(str_long_path.c_str(), u4_attrs)) {
-    return std::unexpected(std::format(L"恢复只读属性失败（错误码 {}）", GetLastError()));
+  AttrFailure af_restore{};
+  if (!end_readonly_guard(ra_attr, str_long_path, &af_restore)) {
+    return std::unexpected(attr_failure_message(af_restore.e_stage,
+                                                af_restore.u4_error));
   }
   const DetectionResult st_after{fn_detect(str_long_path)};
   if (!st_after.str_error.empty()) {

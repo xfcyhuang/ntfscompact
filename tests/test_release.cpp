@@ -4,23 +4,13 @@
 #include "pipeline.hpp"
 #include "release.hpp"
 #include "temp_dir.hpp"
+#include "util.hpp"
 
 #include <windows.h>
 
 namespace {
 
-std::string narrow(const std::wstring& str_wide) {
-  const int i4_bytes{WideCharToMultiByte(CP_UTF8, 0, str_wide.data(),
-                                         static_cast<int>(str_wide.size()),
-                                         nullptr, 0, nullptr, nullptr)};
-  std::string str_utf8(static_cast<std::size_t>(i4_bytes), '\0');
-  if (i4_bytes > 0) {
-    WideCharToMultiByte(CP_UTF8, 0, str_wide.data(),
-                        static_cast<int>(str_wide.size()), str_utf8.data(),
-                        i4_bytes, nullptr, nullptr);
-  }
-  return str_utf8;
-}
+using ntfscompact_test::narrow;
 
 bool has(const std::string& str_haystack, const char* ptr_needle) {
   return str_haystack.find(ptr_needle) != std::string::npos;
