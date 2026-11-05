@@ -3,23 +3,13 @@
 
 #include "pipeline.hpp"
 #include "temp_dir.hpp"
+#include "util.hpp"
 
 #include <windows.h>
 
 namespace {
 
-doctest::String narrow(const std::wstring& str_wide) {
-  const int i4_bytes{WideCharToMultiByte(CP_UTF8, 0, str_wide.data(),
-                                         static_cast<int>(str_wide.size()),
-                                         nullptr, 0, nullptr, nullptr)};
-  std::string str_utf8(static_cast<std::size_t>(i4_bytes), '\0');
-  if (i4_bytes > 0) {
-    WideCharToMultiByte(CP_UTF8, 0, str_wide.data(),
-                        static_cast<int>(str_wide.size()), str_utf8.data(),
-                        i4_bytes, nullptr, nullptr);
-  }
-  return doctest::String(str_utf8.c_str());
-}
+using ntfscompact_test::narrow;
 
 ntfscompact::Options make_options(ntfscompact::Algorithm e_algorithm,
                                   bool b_uncompress = false) {
@@ -135,16 +125,24 @@ TEST_CASE("汇总行：各动作计数与压缩/重压字节段") {
   pl_result.vec_reports.push_back(fr_second);
   pl_result.i4_failures = 2;
   SUBCASE("未采集字节（0 → 0，节省 0%）") {
-    CHECK(narrow(format_summary(pl_result)) ==
+    CHECK(narrow(format_summary(pl_result, make_options(Algorithm::kXpress8k))) ==
           "共 9 个文件：压缩 2、重压 1、解压 1、跳过 3；压缩/重压 0 → 0 字节，"
           "节省 0%；失败 2");
   }
   SUBCASE("已采集字节：整数截断百分比") {
     pl_result.u8_compressed_original = 3000;
     pl_result.u8_compressed_disk = 1000;
-    CHECK(narrow(format_summary(pl_result)) ==
+    CHECK(narrow(format_summary(pl_result, make_options(Algorithm::kXpress8k))) ==
           "共 9 个文件：压缩 2、重压 1、解压 1、跳过 3；压缩/重压 3000 → 1000 "
           "字节，节省 66%；失败 2");
+  }
+  SUBCASE("干跑不输出字节段") {
+    ntfscompact::Options opt_dry{make_options(Algorithm::kXpress8k)};
+    opt_dry.b_dry_run = true;
+    pl_result.u8_compressed_original = 3000;
+    pl_result.u8_compressed_disk = 1000;
+    CHECK(narrow(format_summary(pl_result, opt_dry)) ==
+          "共 9 个文件：压缩 2、重压 1、解压 1、跳过 3；失败 2");
   }
 }
 
@@ -158,7 +156,7 @@ TEST_CASE("汇总行：仅解压/跳过时不输出字节段") {
   pl_result.vec_reports.push_back(fr_skip);
   pl_result.u8_compressed_original = 4096;
   pl_result.u8_compressed_disk = 1024;
-  CHECK(narrow(format_summary(pl_result)) ==
+  CHECK(narrow(format_summary(pl_result, make_options(Algorithm::kXpress8k))) ==
         "共 2 个文件：压缩 0、重压 0、解压 1、跳过 1");
 }
 
@@ -184,7 +182,7 @@ TEST_CASE("汇总行：执行失败与占用跳过的压缩项不计入字节段
   pl_result.i4_failures = 1;
   pl_result.u8_compressed_original = 100;
   pl_result.u8_compressed_disk = 50;
-  CHECK(narrow(format_summary(pl_result)) ==
+  CHECK(narrow(format_summary(pl_result, make_options(Algorithm::kXpress8k))) ==
         "共 3 个文件：压缩 1、重压 0、解压 0、跳过 1；压缩/重压 100 → 50 字节，"
         "节省 50%；失败 1");
 }

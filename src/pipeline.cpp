@@ -214,6 +214,7 @@ int run_pipeline(const Options& opt_options, const DetectFn& fn_detect,
           append_released(fr_report.vec_released, gate_ensure.vec_released);
           const std::expected<void, std::wstring> xe_uncompress{
               fn_uncompress(fr_report.str_long_path)};
+          fr_report.b_executed = true;
           if (!xe_uncompress.has_value()) {
             fr_report.str_error = xe_uncompress.error();
             ++pl_result.i4_failures;
@@ -231,13 +232,11 @@ int run_pipeline(const Options& opt_options, const DetectFn& fn_detect,
   for (const FileReport& fr_report : pl_result.vec_reports) {
     if (report_is_failure(fr_report)) {
       write_utf8(f_err, format_report_line(fr_report, opt_options) + L"\n");
-    } else if (!opt_options.b_quiet &&
-               (opt_options.b_dry_run || opt_options.b_verbose ||
-                !opt_options.b_uncompress)) {
+    } else if (!opt_options.b_quiet) {
       write_utf8(f_out, format_report_line(fr_report, opt_options) + L"\n");
     }
   }
-  write_utf8(f_out, format_summary(pl_result) + L"\n");
+  write_utf8(f_out, format_summary(pl_result, opt_options) + L"\n");
   return pl_result.i4_failures > 0 ? 1 : 0;
 }
 

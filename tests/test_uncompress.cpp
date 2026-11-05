@@ -7,6 +7,7 @@ import std;
 #include "release.hpp"
 #include "pipeline.hpp"
 #include "temp_dir.hpp"
+#include "util.hpp"
 
 #include <windows.h>
 #include <cstdlib>
@@ -15,22 +16,8 @@ namespace {
 
 constexpr std::wstring_view kSentence{L"The quick brown fox jumps over the lazy dog. "};
 
-std::string narrow(const std::wstring& str_wide) {
-  const int i_bytes{WideCharToMultiByte(CP_UTF8, 0, str_wide.data(),
-                                        static_cast<int>(str_wide.size()), nullptr, 0,
-                                        nullptr, nullptr)};
-  std::string str_utf8(static_cast<std::size_t>(i_bytes), '\0');
-  if (i_bytes > 0) {
-    WideCharToMultiByte(CP_UTF8, 0, str_wide.data(), static_cast<int>(str_wide.size()),
-                        str_utf8.data(), i_bytes, nullptr, nullptr);
-  }
-  return str_utf8;
-}
-
-int run_compact(const std::wstring& str_args) {
-  const std::wstring str_cmd{std::format(L"compact {} >nul 2>&1", str_args)};
-  return _wsystem(str_cmd.c_str());
-}
+using ntfscompact_test::narrow;
+using ntfscompact_test::run_compact;
 
 bool write_compressible(const std::wstring& str_path) {
   HANDLE h_file{CreateFileW(ntfscompact_test::temp_long_api_path(str_path).c_str(),
@@ -323,6 +310,9 @@ TEST_CASE("run_pipeline：-u 实跑逐文件解压，未压缩与遍历期跳过
   CHECK(calls_have(vec_calls, L"woflzx.bin"));
   CHECK(calls_have(vec_calls, L"lznt1.bin"));
   CHECK(vec_calls[0].starts_with(L"\\\\?\\"));
+  CHECK(text_contains(str_text, L"[解压] "));
+  CHECK(text_contains(str_text, L"woflzx.bin：已解压"));
+  CHECK(text_contains(str_text, L"[跳过] "));
   CHECK(text_contains(str_text, L"共 4 个文件：压缩 0、重压 0、解压 2、跳过 2"));
 }
 

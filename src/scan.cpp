@@ -64,10 +64,20 @@ bool has_wildcard(const std::wstring& str_path) {
 }
 
 std::uint64_t find_data_size(const WIN32_FIND_DATAW& fd_find) {
-  ULARGE_INTEGER n_size{};
-  n_size.LowPart = fd_find.nFileSizeLow;
-  n_size.HighPart = fd_find.nFileSizeHigh;
-  return n_size.QuadPart;
+  ULARGE_INTEGER u8_size{};
+  u8_size.LowPart = fd_find.nFileSizeLow;
+  u8_size.HighPart = fd_find.nFileSizeHigh;
+  return u8_size.QuadPart;
+}
+
+FileMetadata make_file_metadata(const std::wstring& str_display_path,
+                                const WIN32_FIND_DATAW& fd_find) {
+  FileMetadata fm_meta{};
+  fm_meta.str_display_path = str_display_path;
+  fm_meta.u4_attributes = fd_find.dwFileAttributes;
+  fm_meta.u4_reparse_tag = fd_find.dwReserved0;
+  fm_meta.u8_size = find_data_size(fd_find);
+  return fm_meta;
 }
 
 bool is_directory(const WIN32_FIND_DATAW& fd_find) {
@@ -106,11 +116,7 @@ void walk_directory(const std::wstring& str_long_dir,
         walk_directory(str_child_long, str_child_disp, so_out);
       }
     } else {
-      FileMetadata fm_meta{};
-      fm_meta.str_display_path = str_child_disp;
-      fm_meta.u4_attributes = fd_find.dwFileAttributes;
-      fm_meta.u4_reparse_tag = fd_find.dwReserved0;
-      fm_meta.u8_size = find_data_size(fd_find);
+      const FileMetadata fm_meta{make_file_metadata(str_child_disp, fd_find)};
       std::wstring str_reason{};
       if (check_file_candidate(fm_meta, &str_reason)) {
         so_out.vec_items.push_back(
@@ -143,11 +149,7 @@ void handle_explicit_path(const std::wstring& str_raw, ScanOutcome& so_out) {
     }
     return;
   }
-  FileMetadata fm_meta{};
-  fm_meta.str_display_path = str_display;
-  fm_meta.u4_attributes = fd_find.dwFileAttributes;
-  fm_meta.u4_reparse_tag = fd_find.dwReserved0;
-  fm_meta.u8_size = find_data_size(fd_find);
+  FileMetadata fm_meta{make_file_metadata(str_display, fd_find)};
   std::wstring str_reason{};
   if (check_file_candidate(fm_meta, &str_reason)) {
     so_out.vec_items.push_back({str_long_path, str_display, fm_meta.u8_size});
@@ -182,11 +184,7 @@ void handle_wildcard(const std::wstring& str_raw, ScanOutcome& so_out) {
     if (is_directory(fd_find)) continue;
     const std::wstring str_child_disp{str_parent_disp + L"\\" +
                                       fd_find.cFileName};
-    FileMetadata fm_meta{};
-    fm_meta.str_display_path = str_child_disp;
-    fm_meta.u4_attributes = fd_find.dwFileAttributes;
-    fm_meta.u4_reparse_tag = fd_find.dwReserved0;
-    fm_meta.u8_size = find_data_size(fd_find);
+    const FileMetadata fm_meta{make_file_metadata(str_child_disp, fd_find)};
     std::wstring str_reason{};
     if (check_file_candidate(fm_meta, &str_reason)) {
       so_out.vec_items.push_back(

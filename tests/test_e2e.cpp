@@ -3,6 +3,7 @@
 
 #include "detect.hpp"
 #include "temp_dir.hpp"
+#include "util.hpp"
 
 #include <windows.h>
 #include <cstdlib>
@@ -16,19 +17,8 @@ using ntfscompact::CurrentState;
 using ntfscompact::DetectionResult;
 using ntfscompact::DetectFn;
 using ntfscompact::make_real_detector;
-
-std::string narrow(const std::wstring& str_wide) {
-  const int i4_bytes{WideCharToMultiByte(CP_UTF8, 0, str_wide.data(),
-                                         static_cast<int>(str_wide.size()),
-                                         nullptr, 0, nullptr, nullptr)};
-  std::string str_utf8(static_cast<std::size_t>(i4_bytes), '\0');
-  if (i4_bytes > 0) {
-    WideCharToMultiByte(CP_UTF8, 0, str_wide.data(),
-                        static_cast<int>(str_wide.size()), str_utf8.data(),
-                        i4_bytes, nullptr, nullptr);
-  }
-  return str_utf8;
-}
+using ntfscompact_test::narrow;
+using ntfscompact_test::run_compact;
 
 bool has_text(const std::wstring& str_haystack, const std::wstring& str_needle) {
   return str_haystack.find(str_needle) != std::wstring::npos;
@@ -101,11 +91,6 @@ std::uint64_t disk_usage(const std::wstring& str_path) {
          static_cast<std::uint64_t>(u4_low);
 }
 
-int run_compact(const std::wstring& str_args) {
-  const std::wstring str_cmd{std::format(L"compact {} >nul 2>&1", str_args)};
-  return _wsystem(str_cmd.c_str());
-}
-
 std::wstring decode_utf8(const std::string& str_bytes) {
   if (str_bytes.empty()) {
     return L"";
@@ -137,30 +122,39 @@ struct ToolRun {
   std::wstring str_err{};
 };
 
+struct TestHandleReleaser {
+  void operator()(HANDLE h_raw) const { CloseHandle(h_raw); }
+};
+
+using TestHandle =
+    std::unique_ptr<std::remove_pointer_t<HANDLE>, TestHandleReleaser>;
+
 bool run_tool(const std::wstring& str_arguments, ToolRun& run_result) {
   SECURITY_ATTRIBUTES sa_inherit{};
   sa_inherit.nLength = sizeof(sa_inherit);
   sa_inherit.bInheritHandle = TRUE;
-  HANDLE h_out_read{INVALID_HANDLE_VALUE};
-  HANDLE h_out_write{INVALID_HANDLE_VALUE};
-  HANDLE h_err_read{INVALID_HANDLE_VALUE};
-  HANDLE h_err_write{INVALID_HANDLE_VALUE};
-  if (!CreatePipe(&h_out_read, &h_out_write, &sa_inherit, 0)) {
+  HANDLE h_out_read_raw{INVALID_HANDLE_VALUE};
+  HANDLE h_out_write_raw{INVALID_HANDLE_VALUE};
+  if (!CreatePipe(&h_out_read_raw, &h_out_write_raw, &sa_inherit, 0)) {
     return false;
   }
-  if (!CreatePipe(&h_err_read, &h_err_write, &sa_inherit, 0)) {
-    CloseHandle(h_out_read);
-    CloseHandle(h_out_write);
+  TestHandle guard_out_read{h_out_read_raw};
+  TestHandle guard_out_write{h_out_write_raw};
+  HANDLE h_err_read_raw{INVALID_HANDLE_VALUE};
+  HANDLE h_err_write_raw{INVALID_HANDLE_VALUE};
+  if (!CreatePipe(&h_err_read_raw, &h_err_write_raw, &sa_inherit, 0)) {
     return false;
   }
-  SetHandleInformation(h_out_read, HANDLE_FLAG_INHERIT, 0);
-  SetHandleInformation(h_err_read, HANDLE_FLAG_INHERIT, 0);
+  TestHandle guard_err_read{h_err_read_raw};
+  TestHandle guard_err_write{h_err_write_raw};
+  SetHandleInformation(guard_out_read.get(), HANDLE_FLAG_INHERIT, 0);
+  SetHandleInformation(guard_err_read.get(), HANDLE_FLAG_INHERIT, 0);
 
   STARTUPINFOW si_startup{};
   si_startup.cb = sizeof(si_startup);
   si_startup.dwFlags = STARTF_USESTDHANDLES;
-  si_startup.hStdOutput = h_out_write;
-  si_startup.hStdError = h_err_write;
+  si_startup.hStdOutput = guard_out_write.get();
+  si_startup.hStdError = guard_err_write.get();
   PROCESS_INFORMATION pi_process{};
   const std::wstring str_command{L"\"" + g_str_tool_path + L"\" " + str_arguments};
   std::vector<wchar_t> vec_command(str_command.begin(), str_command.end());
@@ -168,26 +162,22 @@ bool run_tool(const std::wstring& str_arguments, ToolRun& run_result) {
   const BOOL b_started{CreateProcessW(nullptr, vec_command.data(), nullptr,
                                       nullptr, TRUE, 0, nullptr, nullptr,
                                       &si_startup, &pi_process)};
-  CloseHandle(h_out_write);
-  CloseHandle(h_err_write);
+  guard_out_write.reset();
+  guard_err_write.reset();
   if (!b_started) {
-    CloseHandle(h_out_read);
-    CloseHandle(h_err_read);
     return false;
   }
-  run_result.str_out = read_pipe_wide(h_out_read);
-  run_result.str_err = read_pipe_wide(h_err_read);
-  const DWORD u4_wait{WaitForSingleObject(pi_process.hProcess, 60000)};
+  TestHandle guard_process{pi_process.hProcess};
+  TestHandle guard_thread{pi_process.hThread};
+  run_result.str_out = read_pipe_wide(guard_out_read.get());
+  run_result.str_err = read_pipe_wide(guard_err_read.get());
+  const DWORD u4_wait{WaitForSingleObject(guard_process.get(), 60000)};
   if (u4_wait != WAIT_OBJECT_0) {
-    TerminateProcess(pi_process.hProcess, 1);
+    TerminateProcess(guard_process.get(), 1);
   }
   DWORD u4_exit{static_cast<DWORD>(-1)};
-  GetExitCodeProcess(pi_process.hProcess, &u4_exit);
+  GetExitCodeProcess(guard_process.get(), &u4_exit);
   run_result.i4_code = static_cast<int>(u4_exit);
-  CloseHandle(pi_process.hThread);
-  CloseHandle(pi_process.hProcess);
-  CloseHandle(h_out_read);
-  CloseHandle(h_err_read);
   return u4_wait == WAIT_OBJECT_0;
 }
 
@@ -291,10 +281,10 @@ TEST_CASE("e2e_flow：混合目录压缩→逐文件复核→干跑全跳过→�
   CHECK(has_text(run_dry.str_out, str_readonly + L"：已是指定算法 xpress8k"));
   CHECK(has_text(run_dry.str_out, str_lzx + L"：已是指定算法 xpress8k"));
   CHECK(has_text(run_dry.str_out, str_lznt1 + L"：已是指定算法 xpress8k"));
+  CHECK_FALSE(has_text(run_dry.str_out, L"压缩/重压"));
   if (b_random_compressed) {
     CHECK(has_text(run_dry.str_out,
                    L"共 5 个文件：压缩 0、重压 0、解压 0、跳过 5"));
-    CHECK_FALSE(has_text(run_dry.str_out, L"压缩/重压"));
   } else {
     CHECK(has_text(run_dry.str_out,
                    L"共 5 个文件：压缩 1、重压 0、解压 0、跳过 4"));
@@ -306,12 +296,16 @@ TEST_CASE("e2e_flow：混合目录压缩→逐文件复核→干跑全跳过→�
   REQUIRE(run_tool(L"-u \"" + str_dir + L"\"", run_uncompress));
   REQUIRE_MESSAGE(run_uncompress.i4_code == 0,
                   narrow(run_uncompress.str_out + run_uncompress.str_err));
+  CHECK(has_text(run_uncompress.str_out, L"[解压] " + str_plain));
+  CHECK(has_text(run_uncompress.str_out, str_plain + L"：已解压"));
+  CHECK(has_text(run_uncompress.str_out, L"[解压] " + str_lznt1));
   if (b_random_compressed) {
     CHECK(has_text(run_uncompress.str_out,
                    L"共 5 个文件：压缩 0、重压 0、解压 5、跳过 0"));
   } else {
     CHECK(has_text(run_uncompress.str_out,
                    L"共 5 个文件：压缩 0、重压 0、解压 4、跳过 1"));
+    CHECK(has_text(run_uncompress.str_out, L"[跳过] " + str_random));
   }
   for (const std::wstring& str_file : {str_plain, str_readonly, str_lzx,
                                        str_lznt1, str_random}) {
@@ -361,6 +355,7 @@ TEST_CASE("e2e_flow：退出码三态（用法 2 / 部分失败 1 / 全成 0）"
   REQUIRE(run_verify.i4_code == 0);
   CHECK(has_text(run_verify.str_out,
                  L"共 1 个文件：压缩 0、重压 0、解压 0、跳过 1"));
+  CHECK_FALSE(has_text(run_verify.str_out, L"压缩/重压"));
 }
 
 int wmain(int argc, wchar_t** argv) {

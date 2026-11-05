@@ -3,28 +3,14 @@
 
 #include "detect.hpp"
 #include "temp_dir.hpp"
+#include "util.hpp"
 
 #include <windows.h>
 
 namespace {
 
-doctest::String narrow(const std::wstring& str_wide) {
-  const int i4_bytes{WideCharToMultiByte(CP_UTF8, 0, str_wide.data(),
-                                         static_cast<int>(str_wide.size()),
-                                         nullptr, 0, nullptr, nullptr)};
-  std::string str_utf8(static_cast<std::size_t>(i4_bytes), '\0');
-  if (i4_bytes > 0) {
-    WideCharToMultiByte(CP_UTF8, 0, str_wide.data(),
-                        static_cast<int>(str_wide.size()), str_utf8.data(),
-                        i4_bytes, nullptr, nullptr);
-  }
-  return doctest::String(str_utf8.c_str());
-}
-
-int run_compact(const std::wstring& str_args) {
-  const std::wstring str_cmd{L"compact " + str_args + L" >nul 2>&1"};
-  return _wsystem(str_cmd.c_str());
-}
+using ntfscompact_test::narrow;
+using ntfscompact_test::run_compact;
 
 bool write_compressible(const std::wstring& str_path) {
   HANDLE h_file{

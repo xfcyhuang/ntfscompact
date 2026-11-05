@@ -1,5 +1,7 @@
 #include "detect.hpp"
 
+#include "wof_util.hpp"
+
 #include <windows.h>
 
 #ifndef FSCTL_GET_COMPRESSION
@@ -10,41 +12,7 @@
 namespace ntfscompact {
 namespace {
 
-struct WofFileCompressionInfoV1 {
-  ULONG u4_algorithm{};
-  ULONG u4_flags{};
-};
-
-using WofIsExternalFilePtr = ULONG(WINAPI*)(LPCWSTR, PBOOL, PULONG, PVOID,
-                                            PULONG);
-
-constexpr ULONG kAlgoXpress4k{0};
-constexpr ULONG kAlgoLzx{1};
-constexpr ULONG kAlgoXpress8k{2};
-constexpr ULONG kAlgoXpress16k{3};
-
 constexpr USHORT kFormatNone{0};
-
-Algorithm algorithm_from_wof(ULONG u4_algo) {
-  switch (u4_algo) {
-    case kAlgoXpress4k: return Algorithm::kXpress4k;
-    case kAlgoLzx: return Algorithm::kLzx;
-    case kAlgoXpress8k: return Algorithm::kXpress8k;
-    case kAlgoXpress16k: return Algorithm::kXpress16k;
-    default: return Algorithm::kXpress4k;
-  }
-}
-
-struct HmoduleReleaser {
-  void operator()(HMODULE h_module) const {
-    if (h_module != nullptr) {
-      FreeLibrary(h_module);
-    }
-  }
-};
-
-using HmoduleGuard =
-    std::unique_ptr<std::remove_pointer_t<HMODULE>, HmoduleReleaser>;
 
 struct DetectorContext {
   HmoduleGuard guard_module{};
@@ -70,7 +38,7 @@ DetectionResult detect_with(const DetectorContext& ctx_detector,
   if (b_external) {
     dr_result.cs_state.e_kind = CurrentState::Kind::kWof;
     dr_result.cs_state.i4_provider = static_cast<int>(u4_provider);
-    dr_result.cs_state.e_algorithm = algorithm_from_wof(info_current.u4_algorithm);
+    dr_result.cs_state.e_algorithm = from_wof_algorithm(info_current.u4_algorithm);
     return dr_result;
   }
   HANDLE h_file{CreateFileW(str_long_path.c_str(), FILE_READ_ATTRIBUTES,
@@ -105,15 +73,15 @@ DetectionResult detect_with(const DetectorContext& ctx_detector,
 }
 
 auto make_real_detector() -> std::expected<DetectFn, std::wstring> {
-  HMODULE h_module{LoadLibraryW(L"wofutil.dll")};
-  if (h_module == nullptr) {
+  auto xe_module{load_wofutil_module()};
+  if (!xe_module.has_value()) {
     return std::unexpected(std::format(
         L"无法加载 wofutil.dll（错误码 {}）：WOF 现状检测不可用，工具终止。"
         L"该 DLL 为 Windows 10+ 系统组件，请确认系统完整性。",
-        GetLastError()));
+        std::move(xe_module).error()));
   }
-  HmoduleGuard guard_module{h_module};
-  FARPROC ptr_is{GetProcAddress(h_module, "WofIsExternalFile")};
+  HmoduleGuard guard_module{std::move(xe_module).value()};
+  FARPROC ptr_is{GetProcAddress(guard_module.get(), "WofIsExternalFile")};
   if (ptr_is == nullptr) {
     return std::unexpected(std::format(
         L"wofutil.dll 中未找到 WofIsExternalFile 导出（错误码 {}）：无法检测 WOF 现状。",
