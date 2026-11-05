@@ -202,3 +202,4 @@ TEST_CASE("用法文本覆盖全部选项与算法取值") {
   CHECK(str_usage.find(L"--help") != std::wstring::npos);
   CHECK(str_usage.find(L"--version") != std::wstring::npos);
 }
+
