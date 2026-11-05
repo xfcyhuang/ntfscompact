@@ -56,5 +56,10 @@ add_executable(ntfscompact_release_tests tests/test_release.cpp)
 target_link_libraries(ntfscompact_release_tests PRIVATE ntfscompact_core)
 add_test(NAME release_real COMMAND ntfscompact_release_tests)
 
+add_executable(ntfscompact_e2e_tests tests/test_e2e.cpp)
+target_link_libraries(ntfscompact_e2e_tests PRIVATE ntfscompact_core)
+target_link_options(ntfscompact_e2e_tests PRIVATE -municode)
+add_test(NAME e2e_flow COMMAND ntfscompact_e2e_tests $<TARGET_FILE:ntfscompact>)
+
 get_property(NTFSCOMPACT_ALL_TESTS DIRECTORY PROPERTY TESTS)
 set_tests_properties(${NTFSCOMPACT_ALL_TESTS} PROPERTIES TIMEOUT 180)
