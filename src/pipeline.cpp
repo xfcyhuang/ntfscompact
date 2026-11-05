@@ -209,6 +209,12 @@ int run_pipeline(const Options& opt_options, const DetectFn& fn_detect,
             mark_busy_skip(fr_report, gate_ensure.str_busy_reason);
           }
           if (fr_report.b_executed &&
+              fr_report.er_exec.e_outcome == ExecuteResult::Outcome::kSuccess) {
+            fr_report.u8_disk_size =
+                query_disk_usage(fr_report.str_long_path,
+                                 fr_report.u8_logical_size);
+          }
+          if (fr_report.b_executed &&
               fr_report.er_exec.e_outcome == ExecuteResult::Outcome::kError) {
             ++pl_result.i4_failures;
           }

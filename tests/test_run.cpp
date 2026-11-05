@@ -651,6 +651,7 @@ TEST_CASE("run_pipeline：-v 汇总与逐文件行同出，占用项带卷卸载
   CHECK(i4_code == 0);
   CHECK(count_lines(str_text) == 2);
   CHECK(contains(str_text, L"plain.bin：现状 未压缩，已压缩为指定算法 xpress8k（8192 → "));
+  CHECK_FALSE(contains(str_text, L"→ 0 字节）"));
   CHECK(contains(str_text, L"；压缩/重压 8192 → 8192 字节，节省 0%"));
 }
 
@@ -684,6 +685,7 @@ TEST_CASE("run_pipeline：占用经强制卸载后执行且 -v 列出被关进�
   CHECK(contains(rec_release.vec_calls[0], L"plain.bin"));
   REQUIRE(recorder.vec_calls.size() == 1);
   CHECK(contains(str_text, L"plain.bin：现状 未压缩，已压缩为指定算法 xpress8k（8192 → "));
+  CHECK_FALSE(contains(str_text, L"→ 0 字节）"));
   CHECK(contains(str_text, L"；强制卸载：已卸载所在卷"));
   CHECK(contains(str_text, L"共 1 个文件：压缩 1、重压 0、解压 0、跳过 0"));
 }
