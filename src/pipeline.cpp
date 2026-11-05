@@ -17,6 +17,7 @@ void write_utf8(std::FILE* f_stream, const std::wstring& str_text) {
                         i4_bytes, nullptr, nullptr);
   }
   std::print(f_stream, "{}", std::string_view{str_utf8});
+  std::fflush(f_stream);
 }
 
 namespace {
@@ -89,6 +90,16 @@ bool report_is_failure(const FileReport& fr_report) {
           fr_report.er_exec.e_outcome == ExecuteResult::Outcome::kError);
 }
 
+void emit_report(const FileReport& fr_report, const Options& opt_options,
+                 std::FILE* f_out, std::FILE* f_err) {
+  if (report_is_failure(fr_report)) {
+    write_utf8(f_err, format_report_line(fr_report, opt_options) + L"\n");
+  } else if (!opt_options.b_quiet) {
+    write_utf8(f_out, format_report_line(fr_report, opt_options) + L"\n");
+  }
+}
+
+
 }
 
 void collect_byte_stats(PipelineResult& pl_result) {
@@ -153,7 +164,10 @@ int run_pipeline(const Options& opt_options, const DetectFn& fn_detect,
 
   if (!opt_options.b_dry_run) {
     for (FileReport& fr_report : pl_result.vec_reports) {
-      if (!fr_report.str_error.empty()) continue;
+      if (!fr_report.str_error.empty()) {
+        emit_report(fr_report, opt_options, f_out, f_err);
+        continue;
+      }
       switch (fr_report.pl_plan.e_action) {
         case Plan::Action::kCompress:
         case Plan::Action::kRecompress: {
@@ -225,16 +239,15 @@ int run_pipeline(const Options& opt_options, const DetectFn& fn_detect,
         case Plan::Action::kSkip:
           break;
       }
+      emit_report(fr_report, opt_options, f_out, f_err);
     }
   }
 
   collect_byte_stats(pl_result);
 
-  for (const FileReport& fr_report : pl_result.vec_reports) {
-    if (report_is_failure(fr_report)) {
-      write_utf8(f_err, format_report_line(fr_report, opt_options) + L"\n");
-    } else if (!opt_options.b_quiet) {
-      write_utf8(f_out, format_report_line(fr_report, opt_options) + L"\n");
+  if (opt_options.b_dry_run) {
+    for (const FileReport& fr_report : pl_result.vec_reports) {
+      emit_report(fr_report, opt_options, f_out, f_err);
     }
   }
   write_utf8(f_out, format_summary(pl_result, opt_options) + L"\n");

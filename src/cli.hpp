@@ -4,7 +4,7 @@ import std;
 
 namespace ntfscompact {
 
-inline constexpr wchar_t kVersion[]{L"0.1.0"};
+inline constexpr wchar_t kVersion[]{L"0.2.0-verbose"};
 
 enum class Algorithm {
   kXpress4k,
