@@ -79,13 +79,13 @@ ntfscompact::DetectionResult fake_detect(const std::wstring& str_long_path) {
     const std::wstring str_name{
         str_long_path.substr(str_long_path.find_last_of(L"\\") + 1)};
     if (str_name == L"failme.bin") {
-      st.error = L"现状检测失败（模拟）";
+      st.str_error = L"现状检测失败（模拟）";
     } else if (str_name == L"woflzx.bin") {
-      st.state.kind = ntfscompact::CurrentState::Kind::Wof;
-      st.state.algorithm = ntfscompact::Algorithm::Lzx;
-      st.state.provider = ntfscompact::CurrentState::kProviderFile;
+      st.cs_state.e_kind = ntfscompact::CurrentState::Kind::kWof;
+      st.cs_state.e_algorithm = ntfscompact::Algorithm::kLzx;
+      st.cs_state.i4_provider = ntfscompact::CurrentState::kProviderFile;
     } else if (str_name == L"lznt1.bin") {
-      st.state.kind = ntfscompact::CurrentState::Kind::Lznt1;
+      st.cs_state.e_kind = ntfscompact::CurrentState::Kind::kLznt1;
     }
     return st;
   }
@@ -143,7 +143,7 @@ using ntfscompact::Options;
 using ntfscompact::Plan;
 using ntfscompact::DetectFn;
 using ntfscompact::make_real_detector;
-using ntfscompact::RunPipeline;
+using ntfscompact::run_pipeline;
 using ntfscompact::UncompressFn;
 using ntfscompact::make_real_uncompressor;
 using ntfscompact::uncompress_file;
@@ -171,12 +171,12 @@ TEST_CASE("uncompress_file：WOF 四算法解压后非 backing 且内容不变")
       continue;
     }
     const DetectionResult st_before{fn_detect(str_file)};
-    if (st_before.state.kind != CurrentState::Kind::Wof) {
+    if (st_before.cs_state.e_kind != CurrentState::Kind::kWof) {
       const std::string str_silent8{"compact /exe 静默未压成 WOF（研究笔记已记录该偶发），跳过该算法断言"};
       MESSAGE(str_silent8);
       continue;
     }
-    REQUIRE(narrow(st_before.error).empty());
+    REQUIRE(narrow(st_before.str_error).empty());
     const std::vector<char> vec_before{read_all_bytes(str_file)};
     REQUIRE(!vec_before.empty());
 
@@ -188,8 +188,8 @@ TEST_CASE("uncompress_file：WOF 四算法解压后非 backing 且内容不变")
     }
 
     const DetectionResult st_after{fn_detect(str_file)};
-    REQUIRE(narrow(st_after.error).empty());
-    CHECK(st_after.state.kind == CurrentState::Kind::None);
+    REQUIRE(narrow(st_after.str_error).empty());
+    CHECK(st_after.cs_state.e_kind == CurrentState::Kind::kNone);
 
     const std::vector<char> vec_after{read_all_bytes(str_file)};
     REQUIRE(vec_after.size() == vec_before.size());
@@ -210,8 +210,8 @@ TEST_CASE("uncompress_file：LZNT1 文件解压成功且内容不变") {
   REQUIRE(run_compact(L"/c \"" + str_file + L"\"") == 0);
 
   const DetectionResult st_before{fn_detect(str_file)};
-  REQUIRE(narrow(st_before.error).empty());
-  REQUIRE(st_before.state.kind == CurrentState::Kind::Lznt1);
+  REQUIRE(narrow(st_before.str_error).empty());
+  REQUIRE(st_before.cs_state.e_kind == CurrentState::Kind::kLznt1);
   const std::vector<char> vec_before{read_all_bytes(str_file)};
   REQUIRE(!vec_before.empty());
 
@@ -223,8 +223,8 @@ TEST_CASE("uncompress_file：LZNT1 文件解压成功且内容不变") {
   }
 
   const DetectionResult st_after{fn_detect(str_file)};
-  REQUIRE(narrow(st_after.error).empty());
-  CHECK(st_after.state.kind == CurrentState::Kind::None);
+  REQUIRE(narrow(st_after.str_error).empty());
+  CHECK(st_after.cs_state.e_kind == CurrentState::Kind::kNone);
 
   const std::vector<char> vec_after{read_all_bytes(str_file)};
   REQUIRE(vec_after.size() == vec_before.size());
@@ -241,11 +241,11 @@ TEST_CASE("uncompress_file：未压缩文件为无操作成功（幂等）") {
   const std::wstring str_file{tmp.Sub(L"plain.bin")};
   REQUIRE(write_compressible(str_file));
   REQUIRE(run_compact(L"/u \"" + str_file + L"\"") == 0);
-  REQUIRE(fn_detect(str_file).state.kind == CurrentState::Kind::None);
+  REQUIRE(fn_detect(str_file).cs_state.e_kind == CurrentState::Kind::kNone);
 
   const std::expected<void, std::wstring> exp{uncompress_file(str_file, fn_detect)};
   CHECK(exp.has_value());
-  CHECK(fn_detect(str_file).state.kind == CurrentState::Kind::None);
+  CHECK(fn_detect(str_file).cs_state.e_kind == CurrentState::Kind::kNone);
 }
 
 TEST_CASE("uncompress_file：不存在的路径返回错误") {
@@ -263,7 +263,7 @@ TEST_CASE("uncompress_file：不存在的路径返回错误") {
   }
 }
 
-TEST_CASE("RunPipeline：-u 实跑逐文件解压，未压缩与遍历期跳过项不执行") {
+TEST_CASE("run_pipeline：-u 实跑逐文件解压，未压缩与遍历期跳过项不执行") {
   ntfscompact_test::TempDir tmp{};
   REQUIRE(tmp.ok());
   REQUIRE(tmp.WriteFile(L"plain.bin", 8192));
@@ -272,15 +272,15 @@ TEST_CASE("RunPipeline：-u 实跑逐文件解压，未压缩与遍历期跳过�
   REQUIRE(tmp.WriteFile(L"tiny.bin", 100));
 
   Options opt{};
-  opt.uncompress = true;
-  opt.paths.push_back(tmp.path());
+  opt.b_uncompress = true;
+  opt.vec_paths.push_back(tmp.path());
   const ntfscompact::DetectFn fn_detect{fake_detect};
   std::vector<std::wstring> vec_calls{};
   const UncompressFn fn{fake_uncompressor(vec_calls, L"")};
 
   std::FILE* f_out{std::tmpfile()};
   REQUIRE(f_out != nullptr);
-  const int i_code{RunPipeline(opt, fn_detect, ExecuteFn{}, fn, f_out, f_out)};
+  const int i_code{run_pipeline(opt, fn_detect, ExecuteFn{}, fn, f_out, f_out)};
   const std::wstring str_text{read_stream(f_out)};
   std::fclose(f_out);
 
@@ -292,16 +292,16 @@ TEST_CASE("RunPipeline：-u 实跑逐文件解压，未压缩与遍历期跳过�
   CHECK(text_contains(str_text, L"共 4 个文件：压缩 0、重压 0、解压 2、跳过 2"));
 }
 
-TEST_CASE("RunPipeline：解压失败计入失败并继续跑完") {
+TEST_CASE("run_pipeline：解压失败计入失败并继续跑完") {
   ntfscompact_test::TempDir tmp{};
   REQUIRE(tmp.ok());
   REQUIRE(tmp.WriteFile(L"woflzx.bin", 8192));
   REQUIRE(tmp.WriteFile(L"lznt1.bin", 8192));
 
   Options opt{};
-  opt.uncompress = true;
-  opt.verbose = true;
-  opt.paths.push_back(tmp.path());
+  opt.b_uncompress = true;
+  opt.b_verbose = true;
+  opt.vec_paths.push_back(tmp.path());
   const ntfscompact::DetectFn fn_detect{fake_detect};
   std::vector<std::wstring> vec_calls{};
   const UncompressFn fn{fake_uncompressor(vec_calls, L"woflzx.bin")};
@@ -310,7 +310,7 @@ TEST_CASE("RunPipeline：解压失败计入失败并继续跑完") {
   std::FILE* f_err{std::tmpfile()};
   REQUIRE(f_out != nullptr);
   REQUIRE(f_err != nullptr);
-  const int i_code{RunPipeline(opt, fn_detect, ExecuteFn{}, fn, f_out, f_err)};
+  const int i_code{run_pipeline(opt, fn_detect, ExecuteFn{}, fn, f_out, f_err)};
   const std::wstring str_out{read_stream(f_out)};
   const std::wstring str_err{read_stream(f_err)};
   std::fclose(f_out);
@@ -325,23 +325,23 @@ TEST_CASE("RunPipeline：解压失败计入失败并继续跑完") {
   CHECK(text_contains(str_out, L"失败 1"));
 }
 
-TEST_CASE("RunPipeline：-u -n 干跑只报告不执行") {
+TEST_CASE("run_pipeline：-u -n 干跑只报告不执行") {
   ntfscompact_test::TempDir tmp{};
   REQUIRE(tmp.ok());
   REQUIRE(tmp.WriteFile(L"woflzx.bin", 8192));
   REQUIRE(tmp.WriteFile(L"lznt1.bin", 8192));
 
   Options opt{};
-  opt.uncompress = true;
-  opt.dry_run = true;
-  opt.paths.push_back(tmp.path());
+  opt.b_uncompress = true;
+  opt.b_dry_run = true;
+  opt.vec_paths.push_back(tmp.path());
   const ntfscompact::DetectFn fn_detect{fake_detect};
   std::vector<std::wstring> vec_calls{};
   const UncompressFn fn{fake_uncompressor(vec_calls, L"")};
 
   std::FILE* f_out{std::tmpfile()};
   REQUIRE(f_out != nullptr);
-  const int i_code{RunPipeline(opt, fn_detect, ExecuteFn{}, fn, f_out, f_out)};
+  const int i_code{run_pipeline(opt, fn_detect, ExecuteFn{}, fn, f_out, f_out)};
   const std::wstring str_text{read_stream(f_out)};
   std::fclose(f_out);
 
@@ -351,7 +351,7 @@ TEST_CASE("RunPipeline：-u -n 干跑只报告不执行") {
   CHECK(text_contains(str_text, L"将解压"));
 }
 
-TEST_CASE("RunPipeline：压缩模式不调解压执行器") {
+TEST_CASE("run_pipeline：压缩模式不调解压执行器") {
   ntfscompact_test::TempDir tmp{};
   REQUIRE(tmp.ok());
   REQUIRE(tmp.WriteFile(L"plain.bin", 8192));
@@ -359,7 +359,7 @@ TEST_CASE("RunPipeline：压缩模式不调解压执行器") {
   REQUIRE(tmp.WriteFile(L"lznt1.bin", 8192));
 
   Options opt{};
-  opt.paths.push_back(tmp.path());
+  opt.vec_paths.push_back(tmp.path());
   const ntfscompact::DetectFn fn_detect{fake_detect};
   std::vector<std::wstring> vec_calls{};
   const UncompressFn fn{fake_uncompressor(vec_calls, L"")};
@@ -370,7 +370,7 @@ TEST_CASE("RunPipeline：压缩模式不调解压执行器") {
 
   std::FILE* f_out{std::tmpfile()};
   REQUIRE(f_out != nullptr);
-  const int i_code{RunPipeline(opt, fn_detect, fn_execute, fn, f_out, f_out)};
+  const int i_code{run_pipeline(opt, fn_detect, fn_execute, fn, f_out, f_out)};
   std::fclose(f_out);
 
   CHECK(i_code == 0);

@@ -86,8 +86,8 @@ TEST_CASE("RealDetector：普通文件 → 未压缩（None）") {
     REQUIRE(xe_detector.has_value());
     const DetectFn fn_detect{std::move(xe_detector).value()};
     const DetectionResult r = fn_detect(tmp.Sub(L"plain.bin"));
-    CHECK(narrow(r.error) == "");
-    CHECK(r.state.kind == CurrentState::Kind::None);
+    CHECK(narrow(r.str_error) == "");
+    CHECK(r.cs_state.e_kind == CurrentState::Kind::kNone);
 }
 
 TEST_CASE("RealDetector：compact /c 造的 LZNT1 文件 → Lznt1") {
@@ -105,8 +105,8 @@ TEST_CASE("RealDetector：compact /c 造的 LZNT1 文件 → Lznt1") {
     REQUIRE(xe_detector.has_value());
     const DetectFn fn_detect{std::move(xe_detector).value()};
     const DetectionResult r = fn_detect(tmp.Sub(L"lznt1.bin"));
-    CHECK(narrow(r.error) == "");
-    CHECK(r.state.kind == CurrentState::Kind::Lznt1);
+    CHECK(narrow(r.str_error) == "");
+    CHECK(r.cs_state.e_kind == CurrentState::Kind::kLznt1);
 }
 
 TEST_CASE("RealDetector：compact /exe:lzx 造的 WOF 文件 → Wof/lzx/ProviderFile") {
@@ -129,10 +129,10 @@ TEST_CASE("RealDetector：compact /exe:lzx 造的 WOF 文件 → Wof/lzx/Provide
     REQUIRE(xe_detector.has_value());
     const DetectFn fn_detect{std::move(xe_detector).value()};
     const DetectionResult r = fn_detect(tmp.Sub(L"wof.bin"));
-    CHECK(narrow(r.error) == "");
-    CHECK(r.state.kind == CurrentState::Kind::Wof);
-    CHECK(r.state.provider == CurrentState::kProviderFile);
-    CHECK(r.state.algorithm == Algorithm::Lzx);
+    CHECK(narrow(r.str_error) == "");
+    CHECK(r.cs_state.e_kind == CurrentState::Kind::kWof);
+    CHECK(r.cs_state.i4_provider == CurrentState::kProviderFile);
+    CHECK(r.cs_state.e_algorithm == Algorithm::kLzx);
 }
 
 TEST_CASE("RealDetector：不存在的路径 → 带错误的 DetectionResult") {
@@ -141,7 +141,7 @@ TEST_CASE("RealDetector：不存在的路径 → 带错误的 DetectionResult") 
     const DetectFn fn_detect{std::move(xe_detector).value()};
     const DetectionResult r =
         fn_detect(L"\\\\?\\D:\\Temp\\no-such-file-t3.bin");
-    CHECK_FALSE(r.error.empty());
+    CHECK_FALSE(r.str_error.empty());
 }
 
 TEST_CASE("RealDetector：LZNT1 文件 compact /u 后 → None（状态可逆复核）") {
@@ -154,10 +154,10 @@ TEST_CASE("RealDetector：LZNT1 文件 compact /u 后 → None（状态可逆复
     auto xe_detector{make_real_detector()};
     REQUIRE(xe_detector.has_value());
     const DetectFn fn_detect{std::move(xe_detector).value()};
-    CHECK(fn_detect(tmp.Sub(L"roundtrip.bin")).state.kind ==
-          CurrentState::Kind::Lznt1);
+    CHECK(fn_detect(tmp.Sub(L"roundtrip.bin")).cs_state.e_kind ==
+          CurrentState::Kind::kLznt1);
 
     REQUIRE(RunCompact(L"/u \"" + tmp.Sub(L"roundtrip.bin") + L"\"") == 0);
-    CHECK(fn_detect(tmp.Sub(L"roundtrip.bin")).state.kind ==
-          CurrentState::Kind::None);
+    CHECK(fn_detect(tmp.Sub(L"roundtrip.bin")).cs_state.e_kind ==
+          CurrentState::Kind::kNone);
 }

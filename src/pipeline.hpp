@@ -10,117 +10,124 @@ import std;
 namespace ntfscompact {
 
 struct FileReport {
-  std::wstring display_path;
-  std::wstring str_long_path;
-  Plan plan;
-  bool has_state = false;
-  CurrentState state;
-  std::wstring error;
-  bool b_executed = false;
-  ExecuteResult er_exec;
+  std::wstring str_display_path{};
+  std::wstring str_long_path{};
+  Plan pl_plan{};
+  bool b_has_state{false};
+  CurrentState cs_state{};
+  std::wstring str_error{};
+  bool b_executed{false};
+  ExecuteResult er_exec{};
 };
 
 struct PipelineResult {
-  std::vector<FileReport> reports;
-  int failures = 0;
+  std::vector<FileReport> vec_reports{};
+  int i4_failures{};
 };
 
-inline std::wstring FormatReportLine(const FileReport& r, const Options& options) {
-  if (!r.error.empty()) {
-    return L"[失败] " + r.display_path + L"：" + r.error;
+inline std::wstring format_report_line(const FileReport& fr_report,
+                                       const Options& opt_options) {
+  if (!fr_report.str_error.empty()) {
+    return L"[失败] " + fr_report.str_display_path + L"：" + fr_report.str_error;
   }
-  if (r.b_executed && r.er_exec.e_outcome == ExecuteResult::Outcome::kError) {
-    return L"[失败] " + r.display_path + L"：" + r.er_exec.str_message;
+  if (fr_report.b_executed &&
+      fr_report.er_exec.e_outcome == ExecuteResult::Outcome::kError) {
+    return L"[失败] " + fr_report.str_display_path + L"：" +
+           fr_report.er_exec.str_message;
   }
-  const wchar_t* ptr_tag = nullptr;
-  switch (r.plan.action) {
-    case Plan::Action::Compress: ptr_tag = L"压缩"; break;
-    case Plan::Action::Recompress: ptr_tag = L"重压"; break;
-    case Plan::Action::Uncompress: ptr_tag = L"解压"; break;
-    case Plan::Action::Skip: ptr_tag = L"跳过"; break;
+  const wchar_t* ptr_tag{nullptr};
+  switch (fr_report.pl_plan.e_action) {
+    case Plan::Action::kCompress: ptr_tag = L"压缩"; break;
+    case Plan::Action::kRecompress: ptr_tag = L"重压"; break;
+    case Plan::Action::kUncompress: ptr_tag = L"解压"; break;
+    case Plan::Action::kSkip: ptr_tag = L"跳过"; break;
   }
-  std::wstring line = L"[";
-  line += ptr_tag;
-  line += L"] ";
-  line += r.display_path;
-  line += L"：";
-  if (r.b_executed) {
-    switch (r.er_exec.e_outcome) {
+  std::wstring str_line{L"["};
+  str_line += ptr_tag;
+  str_line += L"] ";
+  str_line += fr_report.str_display_path;
+  str_line += L"：";
+  if (fr_report.b_executed) {
+    switch (fr_report.er_exec.e_outcome) {
       case ExecuteResult::Outcome::kSuccess:
-        line += r.plan.action == Plan::Action::Compress
-                    ? L"已压缩为指定算法 "
-                    : L"已重压为指定算法 ";
-        line += AlgorithmName(options.algorithm);
+        str_line += fr_report.pl_plan.e_action == Plan::Action::kCompress
+                        ? L"已压缩为指定算法 "
+                        : L"已重压为指定算法 ";
+        str_line += algorithm_name(opt_options.e_algorithm);
         break;
       case ExecuteResult::Outcome::kSkipped:
-        line += r.er_exec.str_message;
+        str_line += fr_report.er_exec.str_message;
         break;
       case ExecuteResult::Outcome::kError:
         break;
     }
-    return line;
+    return str_line;
   }
-  switch (r.plan.action) {
-    case Plan::Action::Compress:
-      line += L"现状 " + DescribeState(r.state) + L"，将压缩为指定算法 " +
-              AlgorithmName(options.algorithm);
+  switch (fr_report.pl_plan.e_action) {
+    case Plan::Action::kCompress:
+      str_line += L"现状 " + describe_state(fr_report.cs_state) +
+                  L"，将压缩为指定算法 " +
+                  algorithm_name(opt_options.e_algorithm);
       break;
-    case Plan::Action::Recompress:
-      line += L"现状 " + DescribeState(r.state) + L"，将重压为指定算法 " +
-              AlgorithmName(options.algorithm);
+    case Plan::Action::kRecompress:
+      str_line += L"现状 " + describe_state(fr_report.cs_state) +
+                  L"，将重压为指定算法 " +
+                  algorithm_name(opt_options.e_algorithm);
       break;
-    case Plan::Action::Uncompress:
-      line += L"现状 " + DescribeState(r.state) + L"，将解压";
+    case Plan::Action::kUncompress:
+      str_line += L"现状 " + describe_state(fr_report.cs_state) + L"，将解压";
       break;
-    case Plan::Action::Skip:
-      line += r.plan.reason;
+    case Plan::Action::kSkip:
+      str_line += fr_report.pl_plan.str_reason;
       break;
   }
-  return line;
+  return str_line;
 }
 
-inline std::wstring FormatSummary(const PipelineResult& result) {
-  int compress = 0, recompress = 0, uncompress = 0, skip = 0;
-  for (const FileReport& r : result.reports) {
-    if (!r.error.empty()) continue;
-    if (r.b_executed) {
-      switch (r.er_exec.e_outcome) {
+inline std::wstring format_summary(const PipelineResult& pl_result) {
+  int i4_compress{0};
+  int i4_recompress{0};
+  int i4_uncompress{0};
+  int i4_skip{0};
+  for (const FileReport& fr_report : pl_result.vec_reports) {
+    if (!fr_report.str_error.empty()) continue;
+    if (fr_report.b_executed) {
+      switch (fr_report.er_exec.e_outcome) {
         case ExecuteResult::Outcome::kSuccess:
-          switch (r.plan.action) {
-            case Plan::Action::Compress: ++compress; break;
-            case Plan::Action::Recompress: ++recompress; break;
+          switch (fr_report.pl_plan.e_action) {
+            case Plan::Action::kCompress: ++i4_compress; break;
+            case Plan::Action::kRecompress: ++i4_recompress; break;
             default: break;
           }
           break;
-        case ExecuteResult::Outcome::kSkipped: ++skip; break;
+        case ExecuteResult::Outcome::kSkipped: ++i4_skip; break;
         case ExecuteResult::Outcome::kError: break;
       }
       continue;
     }
-    switch (r.plan.action) {
-      case Plan::Action::Compress: ++compress; break;
-      case Plan::Action::Recompress: ++recompress; break;
-      case Plan::Action::Uncompress: ++uncompress; break;
-      case Plan::Action::Skip: ++skip; break;
+    switch (fr_report.pl_plan.e_action) {
+      case Plan::Action::kCompress: ++i4_compress; break;
+      case Plan::Action::kRecompress: ++i4_recompress; break;
+      case Plan::Action::kUncompress: ++i4_uncompress; break;
+      case Plan::Action::kSkip: ++i4_skip; break;
     }
   }
-  std::wstring line = L"共 " + std::to_wstring(result.reports.size()) +
-                      L" 个文件：压缩 " + std::to_wstring(compress) +
-                      L"、重压 " + std::to_wstring(recompress) +
-                      L"、解压 " + std::to_wstring(uncompress) +
-                      L"、跳过 " + std::to_wstring(skip);
-  if (result.failures > 0) {
-    line += L"；失败 " + std::to_wstring(result.failures);
+  std::wstring str_line{std::format(L"共 {} 个文件：压缩 {}、重压 {}、解压 {}、跳过 {}",
+                                    pl_result.vec_reports.size(), i4_compress,
+                                    i4_recompress, i4_uncompress, i4_skip)};
+  if (pl_result.i4_failures > 0) {
+    str_line += std::format(L"；失败 {}", pl_result.i4_failures);
   }
-  return line;
+  return str_line;
 }
 
-PipelineResult RunScan(const Options& options, const DetectFn& fn_detect);
+PipelineResult run_scan(const Options& opt_options, const DetectFn& fn_detect);
 
-void WriteUtf8(std::FILE* stream, const std::wstring& text);
+void write_utf8(std::FILE* f_stream, const std::wstring& str_text);
 
-int RunPipeline(const Options& options, const DetectFn& fn_detect,
-                const ExecuteFn& fn_execute, const UncompressFn& fn_uncompress,
-                std::FILE* out, std::FILE* err);
+int run_pipeline(const Options& opt_options, const DetectFn& fn_detect,
+                 const ExecuteFn& fn_execute,
+                 const UncompressFn& fn_uncompress, std::FILE* f_out,
+                 std::FILE* f_err);
 
 }

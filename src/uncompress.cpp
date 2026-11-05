@@ -40,7 +40,7 @@ auto run_clear_lznt1(HANDLE h_file) -> DWORD {
 }
 
 auto describe_recheck(const CurrentState& st_after, DWORD u4_ioctl_err) -> std::wstring {
-  return std::format(L"解压后复核不符：仍为 {}（执行错误码 {}）", DescribeState(st_after),
+  return std::format(L"解压后复核不符：仍为 {}（执行错误码 {}）", describe_state(st_after),
                      u4_ioctl_err);
 }
 
@@ -49,31 +49,31 @@ auto describe_recheck(const CurrentState& st_after, DWORD u4_ioctl_err) -> std::
 auto uncompress_file(const std::wstring& str_long_path,
                      const DetectFn& fn_detect) -> std::expected<void, std::wstring> {
   const DetectionResult st_before{fn_detect(str_long_path)};
-  if (!st_before.error.empty()) {
-    return std::unexpected(L"解压前现状检测失败：" + st_before.error);
+  if (!st_before.str_error.empty()) {
+    return std::unexpected(L"解压前现状检测失败：" + st_before.str_error);
   }
-  if (st_before.state.kind == CurrentState::Kind::None) {
+  if (st_before.cs_state.e_kind == CurrentState::Kind::kNone) {
     return {};
   }
-  if (st_before.state.kind == CurrentState::Kind::Wof &&
-      st_before.state.provider != CurrentState::kProviderFile) {
+  if (st_before.cs_state.e_kind == CurrentState::Kind::kWof &&
+      st_before.cs_state.i4_provider != CurrentState::kProviderFile) {
     return std::unexpected(L"WIM/Cloud backing 文件不解除（黑名单）");
   }
   HandlePtr ptr_file{open_read_write(str_long_path)};
   if (ptr_file.get() == INVALID_HANDLE_VALUE) {
     return std::unexpected(std::format(L"无法以读写访问打开文件（错误码 {}）", GetLastError()));
   }
-  const DWORD u4_ioctl_err{st_before.state.kind == CurrentState::Kind::Wof
+  const DWORD u4_ioctl_err{st_before.cs_state.e_kind == CurrentState::Kind::kWof
                                ? run_delete_backing(ptr_file.get())
                                : run_clear_lznt1(ptr_file.get())};
   ptr_file.reset();
   const DetectionResult st_after{fn_detect(str_long_path)};
-  if (!st_after.error.empty()) {
-    return std::unexpected(std::format(L"解压后复核失败：{}（执行错误码 {}）", st_after.error,
+  if (!st_after.str_error.empty()) {
+    return std::unexpected(std::format(L"解压后复核失败：{}（执行错误码 {}）", st_after.str_error,
                                        u4_ioctl_err));
   }
-  if (st_after.state.kind != CurrentState::Kind::None) {
-    return std::unexpected(describe_recheck(st_after.state, u4_ioctl_err));
+  if (st_after.cs_state.e_kind != CurrentState::Kind::kNone) {
+    return std::unexpected(describe_recheck(st_after.cs_state, u4_ioctl_err));
   }
   return {};
 }

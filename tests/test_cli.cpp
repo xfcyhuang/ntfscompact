@@ -1,5 +1,5 @@
 // 命令行解析单元测试（工单 #2）
-// 缝（seam）：ParseArgs 纯函数——argv 进、ParseResult 出，无 I/O。
+// 缝（seam）：parse_args 纯函数——argv 进、ParseResult 出，无 I/O。
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include "doctest.h"
 
@@ -19,178 +19,178 @@ doctest::String narrow(const std::wstring& s) {
 }  // namespace
 
 using ntfscompact::Algorithm;
-using ntfscompact::ParseArgs;
+using ntfscompact::parse_args;
 
 TEST_CASE("路径列表：默认算法 xpress8k，开关全关") {
-    const auto r = ParseArgs({L"C:\\data", L"D:\\日志.txt"});
-    REQUIRE(r.ok);
-    REQUIRE(r.options.paths.size() == 2);
-    CHECK(narrow(r.options.paths[0]) == "C:\\data");
-    CHECK(narrow(r.options.paths[1]) == "D:\\??.txt");
-    CHECK(r.options.algorithm == Algorithm::Xpress8k);
-    CHECK_FALSE(r.options.uncompress);
-    CHECK_FALSE(r.options.dry_run);
-    CHECK_FALSE(r.options.quiet);
-    CHECK_FALSE(r.options.verbose);
+    const auto r = parse_args({L"C:\\data", L"D:\\日志.txt"});
+    REQUIRE(r.b_ok);
+    REQUIRE(r.opt_options.vec_paths.size() == 2);
+    CHECK(narrow(r.opt_options.vec_paths[0]) == "C:\\data");
+    CHECK(narrow(r.opt_options.vec_paths[1]) == "D:\\??.txt");
+    CHECK(r.opt_options.e_algorithm == Algorithm::kXpress8k);
+    CHECK_FALSE(r.opt_options.b_uncompress);
+    CHECK_FALSE(r.opt_options.b_dry_run);
+    CHECK_FALSE(r.opt_options.b_quiet);
+    CHECK_FALSE(r.opt_options.b_verbose);
 }
 
 TEST_CASE("-a 接受四个指定算法值") {
     SUBCASE("xpress4k") {
-        const auto r = ParseArgs({L"-a", L"xpress4k", L"p"});
-        REQUIRE(r.ok);
-        CHECK(r.options.algorithm == Algorithm::Xpress4k);
+        const auto r = parse_args({L"-a", L"xpress4k", L"p"});
+        REQUIRE(r.b_ok);
+        CHECK(r.opt_options.e_algorithm == Algorithm::kXpress4k);
     }
     SUBCASE("xpress8k") {
-        const auto r = ParseArgs({L"-a", L"xpress8k", L"p"});
-        REQUIRE(r.ok);
-        CHECK(r.options.algorithm == Algorithm::Xpress8k);
+        const auto r = parse_args({L"-a", L"xpress8k", L"p"});
+        REQUIRE(r.b_ok);
+        CHECK(r.opt_options.e_algorithm == Algorithm::kXpress8k);
     }
     SUBCASE("xpress16k") {
-        const auto r = ParseArgs({L"-a", L"xpress16k", L"p"});
-        REQUIRE(r.ok);
-        CHECK(r.options.algorithm == Algorithm::Xpress16k);
+        const auto r = parse_args({L"-a", L"xpress16k", L"p"});
+        REQUIRE(r.b_ok);
+        CHECK(r.opt_options.e_algorithm == Algorithm::kXpress16k);
     }
     SUBCASE("lzx") {
-        const auto r = ParseArgs({L"-a", L"lzx", L"p"});
-        REQUIRE(r.ok);
-        CHECK(r.options.algorithm == Algorithm::Lzx);
+        const auto r = parse_args({L"-a", L"lzx", L"p"});
+        REQUIRE(r.b_ok);
+        CHECK(r.opt_options.e_algorithm == Algorithm::kLzx);
     }
 }
 
 TEST_CASE("-a 非法值或缺值为用法错误（退出码 2 语义）") {
     SUBCASE("非法值 zip") {
-        const auto r = ParseArgs({L"-a", L"zip", L"p"});
-        CHECK_FALSE(r.ok);
-        CHECK_FALSE(r.error.empty());
+        const auto r = parse_args({L"-a", L"zip", L"p"});
+        CHECK_FALSE(r.b_ok);
+        CHECK_FALSE(r.str_error.empty());
     }
     SUBCASE("非法值大小写不符 XPRESS4K") {
-        const auto r = ParseArgs({L"-a", L"XPRESS4K", L"p"});
-        CHECK_FALSE(r.ok);
-        CHECK_FALSE(r.error.empty());
+        const auto r = parse_args({L"-a", L"XPRESS4K", L"p"});
+        CHECK_FALSE(r.b_ok);
+        CHECK_FALSE(r.str_error.empty());
     }
     SUBCASE("-a 在末尾缺值") {
-        const auto r = ParseArgs({L"p", L"-a"});
-        CHECK_FALSE(r.ok);
-        CHECK_FALSE(r.error.empty());
+        const auto r = parse_args({L"p", L"-a"});
+        CHECK_FALSE(r.b_ok);
+        CHECK_FALSE(r.str_error.empty());
     }
 }
 
 TEST_CASE("开关 -u -n -q -v 各自置位") {
     SUBCASE("-u 解压") {
-        const auto r = ParseArgs({L"-u", L"p"});
-        REQUIRE(r.ok);
-        CHECK(r.options.uncompress);
-        CHECK_FALSE(r.options.dry_run);
-        CHECK_FALSE(r.options.quiet);
-        CHECK_FALSE(r.options.verbose);
+        const auto r = parse_args({L"-u", L"p"});
+        REQUIRE(r.b_ok);
+        CHECK(r.opt_options.b_uncompress);
+        CHECK_FALSE(r.opt_options.b_dry_run);
+        CHECK_FALSE(r.opt_options.b_quiet);
+        CHECK_FALSE(r.opt_options.b_verbose);
     }
     SUBCASE("-n 干跑") {
-        const auto r = ParseArgs({L"-n", L"p"});
-        REQUIRE(r.ok);
-        CHECK(r.options.dry_run);
-        CHECK_FALSE(r.options.uncompress);
+        const auto r = parse_args({L"-n", L"p"});
+        REQUIRE(r.b_ok);
+        CHECK(r.opt_options.b_dry_run);
+        CHECK_FALSE(r.opt_options.b_uncompress);
     }
     SUBCASE("-q 静默") {
-        const auto r = ParseArgs({L"-q", L"p"});
-        REQUIRE(r.ok);
-        CHECK(r.options.quiet);
-        CHECK_FALSE(r.options.uncompress);
+        const auto r = parse_args({L"-q", L"p"});
+        REQUIRE(r.b_ok);
+        CHECK(r.opt_options.b_quiet);
+        CHECK_FALSE(r.opt_options.b_uncompress);
     }
     SUBCASE("-v 详细") {
-        const auto r = ParseArgs({L"-v", L"p"});
-        REQUIRE(r.ok);
-        CHECK(r.options.verbose);
-        CHECK_FALSE(r.options.uncompress);
+        const auto r = parse_args({L"-v", L"p"});
+        REQUIRE(r.b_ok);
+        CHECK(r.opt_options.b_verbose);
+        CHECK_FALSE(r.opt_options.b_uncompress);
     }
 }
 
 TEST_CASE("开关组合混合解析（验收样例 -a lzx -n -v p1 p2）") {
     SUBCASE("选项在前，多路径在后") {
-        const auto r = ParseArgs({L"-a", L"lzx", L"-n", L"-v", L"path1", L"path2"});
-        REQUIRE(r.ok);
-        CHECK(r.options.algorithm == Algorithm::Lzx);
-        CHECK(r.options.dry_run);
-        CHECK(r.options.verbose);
-        CHECK_FALSE(r.options.quiet);
-        CHECK_FALSE(r.options.uncompress);
-        REQUIRE(r.options.paths.size() == 2);
-        CHECK(narrow(r.options.paths[0]) == "path1");
-        CHECK(narrow(r.options.paths[1]) == "path2");
+        const auto r = parse_args({L"-a", L"lzx", L"-n", L"-v", L"path1", L"path2"});
+        REQUIRE(r.b_ok);
+        CHECK(r.opt_options.e_algorithm == Algorithm::kLzx);
+        CHECK(r.opt_options.b_dry_run);
+        CHECK(r.opt_options.b_verbose);
+        CHECK_FALSE(r.opt_options.b_quiet);
+        CHECK_FALSE(r.opt_options.b_uncompress);
+        REQUIRE(r.opt_options.vec_paths.size() == 2);
+        CHECK(narrow(r.opt_options.vec_paths[0]) == "path1");
+        CHECK(narrow(r.opt_options.vec_paths[1]) == "path2");
     }
     SUBCASE("开关穿插在路径之间") {
-        const auto r = ParseArgs({L"p1", L"-q", L"-a", L"xpress4k", L"p2"});
-        REQUIRE(r.ok);
-        CHECK(r.options.quiet);
-        CHECK(r.options.algorithm == Algorithm::Xpress4k);
-        REQUIRE(r.options.paths.size() == 2);
-        CHECK(narrow(r.options.paths[0]) == "p1");
-        CHECK(narrow(r.options.paths[1]) == "p2");
+        const auto r = parse_args({L"p1", L"-q", L"-a", L"xpress4k", L"p2"});
+        REQUIRE(r.b_ok);
+        CHECK(r.opt_options.b_quiet);
+        CHECK(r.opt_options.e_algorithm == Algorithm::kXpress4k);
+        REQUIRE(r.opt_options.vec_paths.size() == 2);
+        CHECK(narrow(r.opt_options.vec_paths[0]) == "p1");
+        CHECK(narrow(r.opt_options.vec_paths[1]) == "p2");
     }
 }
 
 TEST_CASE("无路径参数与未知选项为用法错误（退出码 2 语义）") {
     SUBCASE("无任何参数") {
-        const auto r = ParseArgs({});
-        CHECK_FALSE(r.ok);
-        CHECK_FALSE(r.error.empty());
+        const auto r = parse_args({});
+        CHECK_FALSE(r.b_ok);
+        CHECK_FALSE(r.str_error.empty());
     }
     SUBCASE("只有开关没有路径") {
-        const auto r = ParseArgs({L"-v", L"-q"});
-        CHECK_FALSE(r.ok);
-        CHECK_FALSE(r.error.empty());
+        const auto r = parse_args({L"-v", L"-q"});
+        CHECK_FALSE(r.b_ok);
+        CHECK_FALSE(r.str_error.empty());
     }
     SUBCASE("未知短选项") {
-        const auto r = ParseArgs({L"-x", L"p"});
-        CHECK_FALSE(r.ok);
-        CHECK_FALSE(r.error.empty());
+        const auto r = parse_args({L"-x", L"p"});
+        CHECK_FALSE(r.b_ok);
+        CHECK_FALSE(r.str_error.empty());
     }
     SUBCASE("未知长选项") {
-        const auto r = ParseArgs({L"--bogus", L"p"});
-        CHECK_FALSE(r.ok);
-        CHECK_FALSE(r.error.empty());
+        const auto r = parse_args({L"--bogus", L"p"});
+        CHECK_FALSE(r.b_ok);
+        CHECK_FALSE(r.str_error.empty());
     }
 }
 
 TEST_CASE("-u 与 -a 同现为用法错误（工单 #5：解压模式不指定算法）") {
     SUBCASE("-u 在前 -a 在后") {
-        const auto r = ParseArgs({L"-u", L"-a", L"lzx", L"p"});
-        CHECK_FALSE(r.ok);
-        CHECK_FALSE(r.error.empty());
+        const auto r = parse_args({L"-u", L"-a", L"lzx", L"p"});
+        CHECK_FALSE(r.b_ok);
+        CHECK_FALSE(r.str_error.empty());
     }
     SUBCASE("-a 在前 -u 在后") {
-        const auto r = ParseArgs({L"-a", L"lzx", L"-u", L"p"});
-        CHECK_FALSE(r.ok);
-        CHECK_FALSE(r.error.empty());
+        const auto r = parse_args({L"-a", L"lzx", L"-u", L"p"});
+        CHECK_FALSE(r.b_ok);
+        CHECK_FALSE(r.str_error.empty());
     }
     SUBCASE("-u -a lzx 无路径也报互斥（优先于缺路径）") {
-        const auto r = ParseArgs({L"-u", L"-a", L"lzx"});
-        CHECK_FALSE(r.ok);
-        CHECK_FALSE(r.error.empty());
+        const auto r = parse_args({L"-u", L"-a", L"lzx"});
+        CHECK_FALSE(r.b_ok);
+        CHECK_FALSE(r.str_error.empty());
     }
     SUBCASE("仅 -u 无 -a 仍合法") {
-        const auto r = ParseArgs({L"-u", L"p"});
-        REQUIRE(r.ok);
-        CHECK(r.options.uncompress);
+        const auto r = parse_args({L"-u", L"p"});
+        REQUIRE(r.b_ok);
+        CHECK(r.opt_options.b_uncompress);
     }
 }
 
 TEST_CASE("--help 与 --version 请求") {
     SUBCASE("--help 无路径也合法") {
-        const auto r = ParseArgs({L"--help"});
-        CHECK(r.ok);
-        CHECK(r.want_help);
-        CHECK_FALSE(r.want_version);
+        const auto r = parse_args({L"--help"});
+        CHECK(r.b_ok);
+        CHECK(r.b_want_help);
+        CHECK_FALSE(r.b_want_version);
     }
     SUBCASE("--version 无路径也合法") {
-        const auto r = ParseArgs({L"--version"});
-        CHECK(r.ok);
-        CHECK(r.want_version);
-        CHECK_FALSE(r.want_help);
+        const auto r = parse_args({L"--version"});
+        CHECK(r.b_ok);
+        CHECK(r.b_want_version);
+        CHECK_FALSE(r.b_want_help);
     }
 }
 
 TEST_CASE("用法文本覆盖全部选项与算法取值") {
-    const std::wstring usage = ntfscompact::UsageText();
+    const std::wstring usage = ntfscompact::usage_text();
     CHECK(usage.find(L"xpress4k") != std::wstring::npos);
     CHECK(usage.find(L"xpress8k") != std::wstring::npos);
     CHECK(usage.find(L"xpress16k") != std::wstring::npos);
