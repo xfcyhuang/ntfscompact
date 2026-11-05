@@ -1,6 +1,6 @@
-#include "pipeline.h"
+#include "pipeline.hpp"
 
-#include "scan.h"
+#include "scan.hpp"
 
 #include <string>
 #include <windows.h>

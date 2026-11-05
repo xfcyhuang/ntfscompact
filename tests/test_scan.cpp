@@ -4,8 +4,8 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include "doctest.h"
 
-#include "scan.h"
-#include "temp_dir.h"
+#include "scan.hpp"
+#include "temp_dir.hpp"
 
 #include <algorithm>
 #include <string>

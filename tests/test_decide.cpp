@@ -4,7 +4,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include "doctest.h"
 
-#include "detect.h"
+#include "detect.hpp"
 
 #include <string>
 #include <windows.h>

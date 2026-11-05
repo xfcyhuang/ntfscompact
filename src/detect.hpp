@@ -6,7 +6,7 @@
 
 #include <string>
 
-#include "cli.h"
+#include "cli.hpp"
 
 namespace ntfscompact {
 

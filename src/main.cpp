@@ -1,5 +1,5 @@
-#include "cli.h"
-#include "pipeline.h"
+#include "cli.hpp"
+#include "pipeline.hpp"
 
 #include <cstdio>
 #include <string>

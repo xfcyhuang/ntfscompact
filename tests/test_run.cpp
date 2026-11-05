@@ -1,8 +1,8 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include "doctest.h"
 
-#include "pipeline.h"
-#include "temp_dir.h"
+#include "pipeline.hpp"
+#include "temp_dir.hpp"
 
 #include <windows.h>
 

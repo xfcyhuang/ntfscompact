@@ -1,5 +1,5 @@
 // 命令行解析实现（工单 T1 / #2，测试驱动逐条实现）
-#include "cli.h"
+#include "cli.hpp"
 
 namespace ntfscompact {
 

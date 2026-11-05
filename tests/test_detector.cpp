@@ -7,8 +7,8 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include "doctest.h"
 
-#include "detect.h"
-#include "temp_dir.h"
+#include "detect.hpp"
+#include "temp_dir.hpp"
 
 #include <cstdio>
 #include <string>

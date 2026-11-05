@@ -2,8 +2,8 @@
 
 import std;
 
-#include "cli.h"
-#include "detect.h"
+#include "cli.hpp"
+#include "detect.hpp"
 
 namespace ntfscompact {
 

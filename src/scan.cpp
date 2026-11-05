@@ -1,5 +1,5 @@
 // 路径收集与递归遍历实现（工单 #3）
-#include "scan.h"
+#include "scan.hpp"
 
 namespace ntfscompact {
 namespace {

@@ -2,7 +2,7 @@
 
 import std;
 
-#include "detect.h"
+#include "detect.hpp"
 
 namespace ntfscompact {
 

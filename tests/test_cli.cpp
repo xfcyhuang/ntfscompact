@@ -3,7 +3,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include "doctest.h"
 
-#include "cli.h"
+#include "cli.hpp"
 
 #include <string>
 #include <vector>

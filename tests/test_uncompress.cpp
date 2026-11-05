@@ -3,9 +3,9 @@ import std;
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include "doctest.h"
 
-#include "detect.h"
-#include "pipeline.h"
-#include "temp_dir.h"
+#include "detect.hpp"
+#include "pipeline.hpp"
+#include "temp_dir.hpp"
 
 #include <windows.h>
 #include <cstdlib>

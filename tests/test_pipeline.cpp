@@ -4,7 +4,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include "doctest.h"
 
-#include "pipeline.h"
+#include "pipeline.hpp"
 
 #include <string>
 #include <windows.h>

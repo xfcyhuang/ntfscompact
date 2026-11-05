@@ -1,7 +1,7 @@
 // 生产检测器实现（工单 #3）
 // wofutil.dll 动态加载（本机 MinGW 工具链无 wofutil import lib，见研究笔记）；
 // WOF 算法经 WofIsExternalFile，LZNT1 经 FSCTL_GET_COMPRESSION。
-#include "detect.h"
+#include "detect.hpp"
 
 #include <windows.h>
 

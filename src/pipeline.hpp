@@ -4,8 +4,8 @@
 #include <string>
 #include <vector>
 
-#include "cli.h"
-#include "detect.h"
+#include "cli.hpp"
+#include "detect.hpp"
 #include "executor.hpp"
 #include "uncompress.hpp"
 

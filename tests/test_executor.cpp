@@ -2,7 +2,7 @@
 #include "doctest.h"
 
 #include "executor.hpp"
-#include "temp_dir.h"
+#include "temp_dir.hpp"
 
 #include <cstdlib>
 #include <windows.h>
