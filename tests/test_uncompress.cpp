@@ -32,7 +32,7 @@ int run_compact(const std::wstring& str_args) {
 }
 
 bool write_compressible(const std::wstring& str_path) {
-  HANDLE h_file{CreateFileW(ntfscompact_test::TempDir::LongApiPath(str_path).c_str(),
+  HANDLE h_file{CreateFileW(ntfscompact_test::temp_long_api_path(str_path).c_str(),
                             GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
                             FILE_ATTRIBUTE_NORMAL, nullptr)};
   if (h_file == INVALID_HANDLE_VALUE) {
@@ -58,7 +58,7 @@ bool write_compressible(const std::wstring& str_path) {
 
 std::vector<char> read_all_bytes(const std::wstring& str_path) {
   std::vector<char> vec_bytes{};
-  HANDLE h_file{CreateFileW(ntfscompact_test::TempDir::LongApiPath(str_path).c_str(),
+  HANDLE h_file{CreateFileW(ntfscompact_test::temp_long_api_path(str_path).c_str(),
                             GENERIC_READ,
                             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                             nullptr, OPEN_EXISTING, 0, nullptr)};
@@ -160,9 +160,9 @@ TEST_CASE("uncompress_file：WOF 四算法解压后非 backing 且内容不变")
 
   const wchar_t* vec_algos[]{L"xpress4k", L"xpress8k", L"xpress16k", L"lzx"};
   for (const wchar_t* vec_algo : vec_algos) {
-    ntfscompact_test::TempDir tmp{};
-    REQUIRE(tmp.ok());
-    const std::wstring str_file{tmp.Sub(std::wstring(L"wof-") + vec_algo + L".bin")};
+    ntfscompact_test::TempDir tmp{ntfscompact_test::make_temp_dir()};
+    REQUIRE(tmp->b_ok);
+    const std::wstring str_file{ntfscompact_test::temp_sub(tmp, std::wstring(L"wof-") + vec_algo + L".bin")};
     REQUIRE(write_compressible(str_file));
     REQUIRE(run_compact(L"/u \"" + str_file + L"\"") == 0);
     if (run_compact(std::wstring(L"/exe:") + vec_algo + L" /c \"" + str_file + L"\"") != 0) {
@@ -202,9 +202,9 @@ TEST_CASE("uncompress_file：LZNT1 文件解压成功且内容不变") {
   REQUIRE(xe_detector.has_value());
   const ntfscompact::DetectFn fn_detect{std::move(xe_detector).value()};
 
-  ntfscompact_test::TempDir tmp{};
-  REQUIRE(tmp.ok());
-  const std::wstring str_file{tmp.Sub(L"lznt1.bin")};
+  ntfscompact_test::TempDir tmp{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp->b_ok);
+  const std::wstring str_file{ntfscompact_test::temp_sub(tmp, L"lznt1.bin")};
   REQUIRE(write_compressible(str_file));
   REQUIRE(run_compact(L"/u \"" + str_file + L"\"") == 0);
   REQUIRE(run_compact(L"/c \"" + str_file + L"\"") == 0);
@@ -236,9 +236,9 @@ TEST_CASE("uncompress_file：未压缩文件为无操作成功（幂等）") {
   REQUIRE(xe_detector.has_value());
   const ntfscompact::DetectFn fn_detect{std::move(xe_detector).value()};
 
-  ntfscompact_test::TempDir tmp{};
-  REQUIRE(tmp.ok());
-  const std::wstring str_file{tmp.Sub(L"plain.bin")};
+  ntfscompact_test::TempDir tmp{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp->b_ok);
+  const std::wstring str_file{ntfscompact_test::temp_sub(tmp, L"plain.bin")};
   REQUIRE(write_compressible(str_file));
   REQUIRE(run_compact(L"/u \"" + str_file + L"\"") == 0);
   REQUIRE(fn_detect(str_file).cs_state.e_kind == CurrentState::Kind::kNone);
@@ -252,10 +252,10 @@ TEST_CASE("uncompress_file：不存在的路径返回错误") {
   auto xe_detector{ntfscompact::make_real_detector()};
   REQUIRE(xe_detector.has_value());
   const ntfscompact::DetectFn fn_detect{std::move(xe_detector).value()};
-  ntfscompact_test::TempDir tmp{};
-  REQUIRE(tmp.ok());
+  ntfscompact_test::TempDir tmp{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp->b_ok);
   const std::expected<void, std::wstring> exp{
-      uncompress_file(tmp.Sub(L"no-such-t4.bin"), fn_detect)};
+      uncompress_file(ntfscompact_test::temp_sub(tmp, L"no-such-t4.bin"), fn_detect)};
   CHECK_FALSE(exp.has_value());
   if (!exp.has_value()) {
     const std::string str_err8{narrow(exp.error())};
@@ -264,16 +264,16 @@ TEST_CASE("uncompress_file：不存在的路径返回错误") {
 }
 
 TEST_CASE("run_pipeline：-u 实跑逐文件解压，未压缩与遍历期跳过项不执行") {
-  ntfscompact_test::TempDir tmp{};
-  REQUIRE(tmp.ok());
-  REQUIRE(tmp.WriteFile(L"plain.bin", 8192));
-  REQUIRE(tmp.WriteFile(L"woflzx.bin", 8192));
-  REQUIRE(tmp.WriteFile(L"lznt1.bin", 8192));
-  REQUIRE(tmp.WriteFile(L"tiny.bin", 100));
+  ntfscompact_test::TempDir tmp{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp->b_ok);
+  REQUIRE(ntfscompact_test::temp_write_file(tmp, L"plain.bin", 8192));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp, L"woflzx.bin", 8192));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp, L"lznt1.bin", 8192));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp, L"tiny.bin", 100));
 
   Options opt{};
   opt.b_uncompress = true;
-  opt.vec_paths.push_back(tmp.path());
+  opt.vec_paths.push_back(ntfscompact_test::temp_path(tmp));
   const ntfscompact::DetectFn fn_detect{fake_detect};
   std::vector<std::wstring> vec_calls{};
   const UncompressFn fn{fake_uncompressor(vec_calls, L"")};
@@ -293,15 +293,15 @@ TEST_CASE("run_pipeline：-u 实跑逐文件解压，未压缩与遍历期跳过
 }
 
 TEST_CASE("run_pipeline：解压失败计入失败并继续跑完") {
-  ntfscompact_test::TempDir tmp{};
-  REQUIRE(tmp.ok());
-  REQUIRE(tmp.WriteFile(L"woflzx.bin", 8192));
-  REQUIRE(tmp.WriteFile(L"lznt1.bin", 8192));
+  ntfscompact_test::TempDir tmp{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp->b_ok);
+  REQUIRE(ntfscompact_test::temp_write_file(tmp, L"woflzx.bin", 8192));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp, L"lznt1.bin", 8192));
 
   Options opt{};
   opt.b_uncompress = true;
   opt.b_verbose = true;
-  opt.vec_paths.push_back(tmp.path());
+  opt.vec_paths.push_back(ntfscompact_test::temp_path(tmp));
   const ntfscompact::DetectFn fn_detect{fake_detect};
   std::vector<std::wstring> vec_calls{};
   const UncompressFn fn{fake_uncompressor(vec_calls, L"woflzx.bin")};
@@ -326,15 +326,15 @@ TEST_CASE("run_pipeline：解压失败计入失败并继续跑完") {
 }
 
 TEST_CASE("run_pipeline：-u -n 干跑只报告不执行") {
-  ntfscompact_test::TempDir tmp{};
-  REQUIRE(tmp.ok());
-  REQUIRE(tmp.WriteFile(L"woflzx.bin", 8192));
-  REQUIRE(tmp.WriteFile(L"lznt1.bin", 8192));
+  ntfscompact_test::TempDir tmp{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp->b_ok);
+  REQUIRE(ntfscompact_test::temp_write_file(tmp, L"woflzx.bin", 8192));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp, L"lznt1.bin", 8192));
 
   Options opt{};
   opt.b_uncompress = true;
   opt.b_dry_run = true;
-  opt.vec_paths.push_back(tmp.path());
+  opt.vec_paths.push_back(ntfscompact_test::temp_path(tmp));
   const ntfscompact::DetectFn fn_detect{fake_detect};
   std::vector<std::wstring> vec_calls{};
   const UncompressFn fn{fake_uncompressor(vec_calls, L"")};
@@ -352,14 +352,14 @@ TEST_CASE("run_pipeline：-u -n 干跑只报告不执行") {
 }
 
 TEST_CASE("run_pipeline：压缩模式不调解压执行器") {
-  ntfscompact_test::TempDir tmp{};
-  REQUIRE(tmp.ok());
-  REQUIRE(tmp.WriteFile(L"plain.bin", 8192));
-  REQUIRE(tmp.WriteFile(L"woflzx.bin", 8192));
-  REQUIRE(tmp.WriteFile(L"lznt1.bin", 8192));
+  ntfscompact_test::TempDir tmp{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp->b_ok);
+  REQUIRE(ntfscompact_test::temp_write_file(tmp, L"plain.bin", 8192));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp, L"woflzx.bin", 8192));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp, L"lznt1.bin", 8192));
 
   Options opt{};
-  opt.vec_paths.push_back(tmp.path());
+  opt.vec_paths.push_back(ntfscompact_test::temp_path(tmp));
   const ntfscompact::DetectFn fn_detect{fake_detect};
   std::vector<std::wstring> vec_calls{};
   const UncompressFn fn{fake_uncompressor(vec_calls, L"")};

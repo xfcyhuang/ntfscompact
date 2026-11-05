@@ -1,9 +1,3 @@
-// 真实检测器单元测试（工单 #3）
-// 缝（seam）：RealDetector::Detect——文件路径进、现状压缩形态出。
-// 用 %TEMP%（本地 NTFS）真实文件：compact.exe 造 LZNT1 / WOF 状态；
-// 每次运行新建临时文件并清理，幂等可重复。
-// 注意（研究笔记）：compact /exe:lzx 在部分 Win11 版本会静默不压缩——
-// 以文件属性（sparse+reparse）为 sanity 判据，属性不符则记跳过不计失败。
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include "doctest.h"
 
@@ -14,150 +8,166 @@
 
 namespace {
 
-doctest::String narrow(const std::wstring& s) {
-    const int bytes = WideCharToMultiByte(CP_UTF8, 0, s.data(),
-                                          static_cast<int>(s.size()),
-                                          nullptr, 0, nullptr, nullptr);
-    std::string utf8(static_cast<size_t>(bytes), '\0');
-    if (bytes > 0) {
-        WideCharToMultiByte(CP_UTF8, 0, s.data(), static_cast<int>(s.size()),
-                            utf8.data(), bytes, nullptr, nullptr);
+doctest::String narrow(const std::wstring& str_wide) {
+  const int i4_bytes{WideCharToMultiByte(CP_UTF8, 0, str_wide.data(),
+                                         static_cast<int>(str_wide.size()),
+                                         nullptr, 0, nullptr, nullptr)};
+  std::string str_utf8(static_cast<std::size_t>(i4_bytes), '\0');
+  if (i4_bytes > 0) {
+    WideCharToMultiByte(CP_UTF8, 0, str_wide.data(),
+                        static_cast<int>(str_wide.size()), str_utf8.data(),
+                        i4_bytes, nullptr, nullptr);
+  }
+  return doctest::String(str_utf8.c_str());
+}
+
+int run_compact(const std::wstring& str_args) {
+  const std::wstring str_cmd{L"compact " + str_args + L" >nul 2>&1"};
+  return _wsystem(str_cmd.c_str());
+}
+
+bool write_compressible(const std::wstring& str_path) {
+  HANDLE h_file{
+      CreateFileW(ntfscompact_test::temp_long_api_path(str_path).c_str(),
+                  GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                  FILE_ATTRIBUTE_NORMAL, nullptr)};
+  if (h_file == INVALID_HANDLE_VALUE) {
+    return false;
+  }
+  static const char kSentence[]{"The quick brown fox jumps over the lazy dog. "};
+  static const char kChunk[4096]{};
+  for (int i4_block{0}; i4_block < 4; ++i4_block) {
+    DWORD u4_written{};
+    if (!::WriteFile(h_file, kChunk, sizeof(kChunk), &u4_written, nullptr)) {
+      CloseHandle(h_file);
+      return false;
     }
-    return doctest::String(utf8.c_str());
-}
-
-// 经 cmd 运行 compact（_wsystem 走 cmd.exe，无 shell 路径改写问题），输出静音
-int RunCompact(const std::wstring& args) {
-    const std::wstring cmd = L"compact " + args + L" >nul 2>&1";
-    return _wsystem(cmd.c_str());
-}
-
-// 写可压缩文本文件（重复句子，~180KB，NTFS/WOF 压缩均有收益）
-bool WriteCompressible(const std::wstring& path) {
-    HANDLE h = CreateFileW(ntfscompact_test::TempDir::LongApiPath(path).c_str(),
-                           GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
-                           FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return false;
-    static const char kSentence[] =
-        "The quick brown fox jumps over the lazy dog. ";
-    static const char kChunk[4096] = {};
-    for (int i = 0; i < 4; ++i) {  // 先铺 16KB 固定字节便于整块写
-        DWORD written = 0;
-        if (!::WriteFile(h, kChunk, sizeof(kChunk), &written, nullptr)) {
-            CloseHandle(h);
-            return false;
-        }
+  }
+  for (int i4_line{0}; i4_line < 4000; ++i4_line) {
+    DWORD u4_written{};
+    if (!::WriteFile(h_file, kSentence, sizeof(kSentence) - 1, &u4_written,
+                     nullptr)) {
+      CloseHandle(h_file);
+      return false;
     }
-    // 用重复句子填充余下 160KB+（LZNT1/WOF 均能明显获益）
-    for (int i = 0; i < 4000; ++i) {
-        DWORD written = 0;
-        if (!::WriteFile(h, kSentence, sizeof(kSentence) - 1, &written, nullptr)) {
-            CloseHandle(h);
-            return false;
-        }
-    }
-    CloseHandle(h);
-    return true;
+  }
+  CloseHandle(h_file);
+  return true;
 }
 
-DWORD GetAttrs(const std::wstring& path) {
-    return GetFileAttributesW(
-        ntfscompact_test::TempDir::LongApiPath(path).c_str());
+DWORD get_attrs(const std::wstring& str_path) {
+  return GetFileAttributesW(ntfscompact_test::temp_long_api_path(str_path).c_str());
 }
 
-}  // namespace
-
-using namespace ntfscompact;
-
-TEST_CASE("RealDetector 构造：wofutil.dll 动态加载成功") {
-    auto xe_detector{make_real_detector()};
-    REQUIRE(xe_detector.has_value());  // 本机 Win10+ 必有 wofutil.dll
 }
 
-TEST_CASE("RealDetector：普通文件 → 未压缩（None）") {
-    ntfscompact_test::TempDir tmp;
-    REQUIRE(tmp.ok());
-    REQUIRE(WriteCompressible(tmp.Sub(L"plain.bin")));
-    // %TEMP% 可能是 NTFS 压缩目录（新文件继承 LZNT1），先解压造真普通文件
-    REQUIRE(RunCompact(L"/u \"" + tmp.Sub(L"plain.bin") + L"\"") == 0);
-    REQUIRE((GetAttrs(tmp.Sub(L"plain.bin")) & FILE_ATTRIBUTE_COMPRESSED) == 0);
+using ntfscompact::Algorithm;
+using ntfscompact::CurrentState;
+using ntfscompact::DetectionResult;
+using ntfscompact::DetectFn;
+using ntfscompact::make_real_detector;
 
-    auto xe_detector{make_real_detector()};
-    REQUIRE(xe_detector.has_value());
-    const DetectFn fn_detect{std::move(xe_detector).value()};
-    const DetectionResult r = fn_detect(tmp.Sub(L"plain.bin"));
-    CHECK(narrow(r.str_error) == "");
-    CHECK(r.cs_state.e_kind == CurrentState::Kind::kNone);
+TEST_CASE("make_real_detector：wofutil.dll 动态加载成功") {
+  auto xe_detector{make_real_detector()};
+  REQUIRE(xe_detector.has_value());
 }
 
-TEST_CASE("RealDetector：compact /c 造的 LZNT1 文件 → Lznt1") {
-    ntfscompact_test::TempDir tmp;
-    REQUIRE(tmp.ok());
-    REQUIRE(WriteCompressible(tmp.Sub(L"lznt1.bin")));
-    REQUIRE(RunCompact(L"/u \"" + tmp.Sub(L"lznt1.bin") + L"\"") == 0);  // 固定基线
-    REQUIRE(RunCompact(L"/c \"" + tmp.Sub(L"lznt1.bin") + L"\"") == 0);
+TEST_CASE("make_real_detector：普通文件 → 未压缩（None）") {
+  ntfscompact_test::TempDir tmp{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp->b_ok);
+  REQUIRE(write_compressible(ntfscompact_test::temp_sub(tmp, L"plain.bin")));
+  REQUIRE(run_compact(L"/u \"" + ntfscompact_test::temp_sub(tmp, L"plain.bin") +
+                      L"\"") == 0);
+  REQUIRE((get_attrs(ntfscompact_test::temp_sub(tmp, L"plain.bin")) &
+           FILE_ATTRIBUTE_COMPRESSED) == 0);
 
-    // sanity：compact 应已置 COMPRESSED 属性；否则环境问题，测试失败可见
-    const DWORD attrs = GetAttrs(tmp.Sub(L"lznt1.bin"));
-    REQUIRE((attrs & FILE_ATTRIBUTE_COMPRESSED) != 0);
-
-    auto xe_detector{make_real_detector()};
-    REQUIRE(xe_detector.has_value());
-    const DetectFn fn_detect{std::move(xe_detector).value()};
-    const DetectionResult r = fn_detect(tmp.Sub(L"lznt1.bin"));
-    CHECK(narrow(r.str_error) == "");
-    CHECK(r.cs_state.e_kind == CurrentState::Kind::kLznt1);
+  auto xe_detector{make_real_detector()};
+  REQUIRE(xe_detector.has_value());
+  const DetectFn fn_detect{std::move(xe_detector).value()};
+  const DetectionResult dr_result{
+      fn_detect(ntfscompact_test::temp_sub(tmp, L"plain.bin"))};
+  CHECK(narrow(dr_result.str_error) == "");
+  CHECK(dr_result.cs_state.e_kind == CurrentState::Kind::kNone);
 }
 
-TEST_CASE("RealDetector：compact /exe:lzx 造的 WOF 文件 → Wof/lzx/ProviderFile") {
-    ntfscompact_test::TempDir tmp;
-    REQUIRE(tmp.ok());
-    REQUIRE(WriteCompressible(tmp.Sub(L"wof.bin")));
-    REQUIRE(RunCompact(L"/u \"" + tmp.Sub(L"wof.bin") + L"\"") == 0);  // 固定基线
-    REQUIRE(RunCompact(L"/exe:lzx /c \"" + tmp.Sub(L"wof.bin") + L"\"") == 0);
+TEST_CASE("make_real_detector：compact /c 造的 LZNT1 文件 → Lznt1") {
+  ntfscompact_test::TempDir tmp{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp->b_ok);
+  REQUIRE(write_compressible(ntfscompact_test::temp_sub(tmp, L"lznt1.bin")));
+  REQUIRE(run_compact(L"/u \"" + ntfscompact_test::temp_sub(tmp, L"lznt1.bin") +
+                      L"\"") == 0);
+  REQUIRE(run_compact(L"/c \"" + ntfscompact_test::temp_sub(tmp, L"lznt1.bin") +
+                      L"\"") == 0);
 
-    const DWORD attrs = GetAttrs(tmp.Sub(L"wof.bin"));
-    const bool wof_form =
-        (attrs & FILE_ATTRIBUTE_SPARSE_FILE) != 0 &&
-        (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
-    if (!wof_form) {
-        MESSAGE("compact /exe:lzx 静默未压缩（Win11 偶发，见研究笔记），跳过断言");
-        return;
-    }
+  const DWORD u4_attrs{get_attrs(ntfscompact_test::temp_sub(tmp, L"lznt1.bin"))};
+  REQUIRE((u4_attrs & FILE_ATTRIBUTE_COMPRESSED) != 0);
 
-    auto xe_detector{make_real_detector()};
-    REQUIRE(xe_detector.has_value());
-    const DetectFn fn_detect{std::move(xe_detector).value()};
-    const DetectionResult r = fn_detect(tmp.Sub(L"wof.bin"));
-    CHECK(narrow(r.str_error) == "");
-    CHECK(r.cs_state.e_kind == CurrentState::Kind::kWof);
-    CHECK(r.cs_state.i4_provider == CurrentState::kProviderFile);
-    CHECK(r.cs_state.e_algorithm == Algorithm::kLzx);
+  auto xe_detector{make_real_detector()};
+  REQUIRE(xe_detector.has_value());
+  const DetectFn fn_detect{std::move(xe_detector).value()};
+  const DetectionResult dr_result{
+      fn_detect(ntfscompact_test::temp_sub(tmp, L"lznt1.bin"))};
+  CHECK(narrow(dr_result.str_error) == "");
+  CHECK(dr_result.cs_state.e_kind == CurrentState::Kind::kLznt1);
 }
 
-TEST_CASE("RealDetector：不存在的路径 → 带错误的 DetectionResult") {
-    auto xe_detector{make_real_detector()};
-    REQUIRE(xe_detector.has_value());
-    const DetectFn fn_detect{std::move(xe_detector).value()};
-    const DetectionResult r =
-        fn_detect(L"\\\\?\\D:\\Temp\\no-such-file-t3.bin");
-    CHECK_FALSE(r.str_error.empty());
+TEST_CASE("make_real_detector：compact /exe:lzx 造的 WOF 文件 → Wof/lzx/ProviderFile") {
+  ntfscompact_test::TempDir tmp{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp->b_ok);
+  REQUIRE(write_compressible(ntfscompact_test::temp_sub(tmp, L"wof.bin")));
+  REQUIRE(run_compact(L"/u \"" + ntfscompact_test::temp_sub(tmp, L"wof.bin") +
+                      L"\"") == 0);
+  REQUIRE(run_compact(L"/exe:lzx /c \"" +
+                      ntfscompact_test::temp_sub(tmp, L"wof.bin") + L"\"") == 0);
+
+  const DWORD u4_attrs{get_attrs(ntfscompact_test::temp_sub(tmp, L"wof.bin"))};
+  const bool b_wof_form{(u4_attrs & FILE_ATTRIBUTE_SPARSE_FILE) != 0 &&
+                        (u4_attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0};
+  if (!b_wof_form) {
+    MESSAGE("compact /exe:lzx 静默未压缩（Win11 偶发，见研究笔记），跳过断言");
+    return;
+  }
+
+  auto xe_detector{make_real_detector()};
+  REQUIRE(xe_detector.has_value());
+  const DetectFn fn_detect{std::move(xe_detector).value()};
+  const DetectionResult dr_result{
+      fn_detect(ntfscompact_test::temp_sub(tmp, L"wof.bin"))};
+  CHECK(narrow(dr_result.str_error) == "");
+  CHECK(dr_result.cs_state.e_kind == CurrentState::Kind::kWof);
+  CHECK(dr_result.cs_state.i4_provider == CurrentState::kProviderFile);
+  CHECK(dr_result.cs_state.e_algorithm == Algorithm::kLzx);
 }
 
-TEST_CASE("RealDetector：LZNT1 文件 compact /u 后 → None（状态可逆复核）") {
-    ntfscompact_test::TempDir tmp;
-    REQUIRE(tmp.ok());
-    REQUIRE(WriteCompressible(tmp.Sub(L"roundtrip.bin")));
-    REQUIRE(RunCompact(L"/u \"" + tmp.Sub(L"roundtrip.bin") + L"\"") == 0);  // 固定基线
-    REQUIRE(RunCompact(L"/c \"" + tmp.Sub(L"roundtrip.bin") + L"\"") == 0);
+TEST_CASE("make_real_detector：不存在的路径 → 带错误的 DetectionResult") {
+  auto xe_detector{make_real_detector()};
+  REQUIRE(xe_detector.has_value());
+  const DetectFn fn_detect{std::move(xe_detector).value()};
+  const DetectionResult dr_result{
+      fn_detect(L"\\\\?\\D:\\Temp\\no-such-file-t3.bin")};
+  CHECK_FALSE(dr_result.str_error.empty());
+}
 
-    auto xe_detector{make_real_detector()};
-    REQUIRE(xe_detector.has_value());
-    const DetectFn fn_detect{std::move(xe_detector).value()};
-    CHECK(fn_detect(tmp.Sub(L"roundtrip.bin")).cs_state.e_kind ==
-          CurrentState::Kind::kLznt1);
+TEST_CASE("make_real_detector：LZNT1 文件 compact /u 后 → None（状态可逆复核）") {
+  ntfscompact_test::TempDir tmp{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp->b_ok);
+  REQUIRE(write_compressible(ntfscompact_test::temp_sub(tmp, L"roundtrip.bin")));
+  REQUIRE(run_compact(L"/u \"" +
+                      ntfscompact_test::temp_sub(tmp, L"roundtrip.bin") +
+                      L"\"") == 0);
+  REQUIRE(run_compact(L"/c \"" +
+                      ntfscompact_test::temp_sub(tmp, L"roundtrip.bin") +
+                      L"\"") == 0);
 
-    REQUIRE(RunCompact(L"/u \"" + tmp.Sub(L"roundtrip.bin") + L"\"") == 0);
-    CHECK(fn_detect(tmp.Sub(L"roundtrip.bin")).cs_state.e_kind ==
-          CurrentState::Kind::kNone);
+  auto xe_detector{make_real_detector()};
+  REQUIRE(xe_detector.has_value());
+  const DetectFn fn_detect{std::move(xe_detector).value()};
+  CHECK(fn_detect(ntfscompact_test::temp_sub(tmp, L"roundtrip.bin"))
+            .cs_state.e_kind == CurrentState::Kind::kLznt1);
+
+  REQUIRE(run_compact(L"/u \"" +
+                      ntfscompact_test::temp_sub(tmp, L"roundtrip.bin") +
+                      L"\"") == 0);
+  CHECK(fn_detect(ntfscompact_test::temp_sub(tmp, L"roundtrip.bin"))
+            .cs_state.e_kind == CurrentState::Kind::kNone);
 }

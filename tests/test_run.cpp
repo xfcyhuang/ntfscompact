@@ -60,11 +60,12 @@ struct ExecuteCall {
 
 struct ExecuteRecorder {
   std::vector<ExecuteCall> vec_calls{};
+};
 
-  ExecuteFn fn() {
-    return [this](const std::wstring& str_long_path, Plan::Action e_action,
+ExecuteFn make_record_executor(ExecuteRecorder& rec_record) {
+  return [&rec_record](const std::wstring& str_long_path, Plan::Action e_action,
                   const CurrentState& cs_current, Algorithm) {
-      vec_calls.push_back({str_long_path, e_action, cs_current});
+      rec_record.vec_calls.push_back({str_long_path, e_action, cs_current});
       ExecuteResult er_result{};
       const std::wstring str_name{
           str_long_path.substr(str_long_path.find_last_of(L"\\") + 1)};
@@ -76,9 +77,8 @@ struct ExecuteRecorder {
         er_result.str_message = L"压缩失败（模拟）";
       }
       return er_result;
-    };
-  }
-};
+  };
+}
 
 Options compress_options(Algorithm e_algorithm = Algorithm::kXpress8k) {
   Options opt_result{};
@@ -87,16 +87,16 @@ Options compress_options(Algorithm e_algorithm = Algorithm::kXpress8k) {
 }
 
 std::wstring make_fixture(ntfscompact_test::TempDir& tmp_dir) {
-  REQUIRE(tmp_dir.ok());
-  REQUIRE(tmp_dir.WriteFile(L"plain.bin", 8192));
-  REQUIRE(tmp_dir.WriteFile(L"wof8k.bin", 8192));
-  REQUIRE(tmp_dir.WriteFile(L"woflzx.bin", 8192));
-  REQUIRE(tmp_dir.WriteFile(L"lznt1.bin", 8192));
-  REQUIRE(tmp_dir.WriteFile(L"wim.bin", 8192));
-  REQUIRE(tmp_dir.WriteFile(L"cloud.bin", 8192));
-  REQUIRE(tmp_dir.WriteFile(L"failme.bin", 8192));
-  REQUIRE(tmp_dir.WriteFile(L"tiny.bin", 100));
-  return tmp_dir.path();
+  REQUIRE(tmp_dir->b_ok);
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"plain.bin", 8192));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"wof8k.bin", 8192));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"woflzx.bin", 8192));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"lznt1.bin", 8192));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"wim.bin", 8192));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"cloud.bin", 8192));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"failme.bin", 8192));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"tiny.bin", 100));
+  return ntfscompact_test::temp_path(tmp_dir);
 }
 
 const FileReport* find_report(const PipelineResult& result, const wchar_t* ptr_name) {
@@ -132,7 +132,7 @@ bool contains(const std::wstring& str_haystack, const std::wstring& str_needle) 
 }
 
 TEST_CASE("run_scan：各现状文件得到正确动作（注入假检测器）") {
-  ntfscompact_test::TempDir tmp_dir;
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
   const std::wstring str_dir{make_fixture(tmp_dir)};
 
   Options opt_case{compress_options()};
@@ -187,15 +187,15 @@ TEST_CASE("run_scan：各现状文件得到正确动作（注入假检测器）"
 }
 
 TEST_CASE("run_scan：解压模式下各文件动作") {
-  ntfscompact_test::TempDir tmp_dir;
-  REQUIRE(tmp_dir.ok());
-  REQUIRE(tmp_dir.WriteFile(L"plain.bin", 8192));
-  REQUIRE(tmp_dir.WriteFile(L"woflzx.bin", 8192));
-  REQUIRE(tmp_dir.WriteFile(L"lznt1.bin", 8192));
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"plain.bin", 8192));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"woflzx.bin", 8192));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"lznt1.bin", 8192));
 
   Options opt_case{};
   opt_case.b_uncompress = true;
-  opt_case.vec_paths.push_back(tmp_dir.path());
+  opt_case.vec_paths.push_back(ntfscompact_test::temp_path(tmp_dir));
   const DetectFn fn_detect{fake_detect};
   const PipelineResult result{run_scan(opt_case, fn_detect)};
 
@@ -211,21 +211,21 @@ TEST_CASE("run_scan：解压模式下各文件动作") {
 }
 
 TEST_CASE("run_pipeline：干跑输出每文件计划行与汇总，不执行，退出码 0") {
-  ntfscompact_test::TempDir tmp_dir;
-  REQUIRE(tmp_dir.ok());
-  REQUIRE(tmp_dir.WriteFile(L"plain.bin", 8192));
-  REQUIRE(tmp_dir.WriteFile(L"wof8k.bin", 8192));
-  REQUIRE(tmp_dir.WriteFile(L"woflzx.bin", 8192));
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"plain.bin", 8192));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"wof8k.bin", 8192));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"woflzx.bin", 8192));
 
   Options opt_case{compress_options()};
   opt_case.b_dry_run = true;
-  opt_case.vec_paths.push_back(tmp_dir.path());
+  opt_case.vec_paths.push_back(ntfscompact_test::temp_path(tmp_dir));
   const DetectFn fn_detect{fake_detect};
   ExecuteRecorder recorder{};
 
   std::FILE* f_out{std::tmpfile()};
   REQUIRE(f_out != nullptr);
-  const int i4_code{run_pipeline(opt_case, fn_detect, recorder.fn(),
+  const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
                                 UncompressFn{}, f_out, f_out)};
   CHECK(i4_code == 0);
 
@@ -242,14 +242,14 @@ TEST_CASE("run_pipeline：干跑输出每文件计划行与汇总，不执行，
 }
 
 TEST_CASE("run_pipeline：真实模式执行压缩，每文件结果行与汇总落账") {
-  ntfscompact_test::TempDir tmp_dir;
-  REQUIRE(tmp_dir.ok());
-  REQUIRE(tmp_dir.WriteFile(L"plain.bin", 8192));
-  REQUIRE(tmp_dir.WriteFile(L"skipme.bin", 8192));
-  REQUIRE(tmp_dir.WriteFile(L"execfail.bin", 8192));
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"plain.bin", 8192));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"skipme.bin", 8192));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"execfail.bin", 8192));
 
   Options opt_case{compress_options()};
-  opt_case.vec_paths.push_back(tmp_dir.path());
+  opt_case.vec_paths.push_back(ntfscompact_test::temp_path(tmp_dir));
   const DetectFn fn_detect{fake_detect};
   ExecuteRecorder recorder{};
 
@@ -257,7 +257,7 @@ TEST_CASE("run_pipeline：真实模式执行压缩，每文件结果行与汇总
   std::FILE* f_err{std::tmpfile()};
   REQUIRE(f_out != nullptr);
   REQUIRE(f_err != nullptr);
-  const int i4_code{run_pipeline(opt_case, fn_detect, recorder.fn(),
+  const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
                                 UncompressFn{}, f_out, f_err)};
   CHECK(i4_code == 1);
 
@@ -279,18 +279,18 @@ TEST_CASE("run_pipeline：真实模式执行压缩，每文件结果行与汇总
 }
 
 TEST_CASE("run_pipeline：真实模式重压——LZNT1 与异算法 WOF 传 Recompress") {
-  ntfscompact_test::TempDir tmp_dir;
-  REQUIRE(tmp_dir.ok());
-  REQUIRE(tmp_dir.WriteFile(L"lznt1.bin", 8192));
-  REQUIRE(tmp_dir.WriteFile(L"woflzx.bin", 8192));
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"lznt1.bin", 8192));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"woflzx.bin", 8192));
 
   Options opt_case{compress_options()};
-  opt_case.vec_paths.push_back(tmp_dir.path());
+  opt_case.vec_paths.push_back(ntfscompact_test::temp_path(tmp_dir));
   const DetectFn fn_detect{fake_detect};
   ExecuteRecorder recorder{};
   std::FILE* f_out{std::tmpfile()};
   REQUIRE(f_out != nullptr);
-  run_pipeline(opt_case, fn_detect, recorder.fn(), UncompressFn{}, f_out,
+  run_pipeline(opt_case, fn_detect, make_record_executor(recorder), UncompressFn{}, f_out,
               f_out);
 
   const std::wstring str_text{read_all(f_out)};
@@ -305,20 +305,20 @@ TEST_CASE("run_pipeline：真实模式重压——LZNT1 与异算法 WOF 传 Rec
 }
 
 TEST_CASE("run_pipeline：真实模式失败后继续跑完后续文件") {
-  ntfscompact_test::TempDir tmp_dir;
-  REQUIRE(tmp_dir.ok());
-  REQUIRE(tmp_dir.WriteFile(L"a_execfail.bin", 8192));
-  REQUIRE(tmp_dir.WriteFile(L"b_plain.bin", 8192));
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"a_execfail.bin", 8192));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"b_plain.bin", 8192));
 
   Options opt_case{compress_options()};
-  opt_case.vec_paths.push_back(tmp_dir.path());
+  opt_case.vec_paths.push_back(ntfscompact_test::temp_path(tmp_dir));
   const DetectFn fn_detect{fake_detect};
   ExecuteRecorder recorder{};
   std::FILE* f_out{std::tmpfile()};
   std::FILE* f_err{std::tmpfile()};
   REQUIRE(f_out != nullptr);
   REQUIRE(f_err != nullptr);
-  run_pipeline(opt_case, fn_detect, recorder.fn(), UncompressFn{}, f_out,
+  run_pipeline(opt_case, fn_detect, make_record_executor(recorder), UncompressFn{}, f_out,
               f_err);
 
   CHECK(recorder.vec_calls.size() == 2);
@@ -329,15 +329,15 @@ TEST_CASE("run_pipeline：真实模式失败后继续跑完后续文件") {
 }
 
 TEST_CASE("run_pipeline：Skip 与解压分支分派解压执行器，不碰压缩执行器") {
-  ntfscompact_test::TempDir tmp_dir;
-  REQUIRE(tmp_dir.ok());
-  REQUIRE(tmp_dir.WriteFile(L"wof8k.bin", 8192));
-  REQUIRE(tmp_dir.WriteFile(L"wim.bin", 8192));
-  REQUIRE(tmp_dir.WriteFile(L"lznt1.bin", 8192));
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"wof8k.bin", 8192));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"wim.bin", 8192));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"lznt1.bin", 8192));
 
   Options opt_case{compress_options()};
   opt_case.b_uncompress = true;
-  opt_case.vec_paths.push_back(tmp_dir.path());
+  opt_case.vec_paths.push_back(ntfscompact_test::temp_path(tmp_dir));
   const DetectFn fn_detect{fake_detect};
   ExecuteRecorder recorder{};
   std::vector<std::wstring> vec_uncompress_calls{};
@@ -349,7 +349,7 @@ TEST_CASE("run_pipeline：Skip 与解压分支分派解压执行器，不碰压�
       }};
   std::FILE* f_out{std::tmpfile()};
   REQUIRE(f_out != nullptr);
-  const int i4_code{run_pipeline(opt_case, fn_detect, recorder.fn(),
+  const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
                                 fn_uncompress, f_out, f_out)};
   CHECK(i4_code == 0);
   std::fclose(f_out);
@@ -366,18 +366,18 @@ TEST_CASE("run_pipeline：Skip 与解压分支分派解压执行器，不碰压�
 }
 
 TEST_CASE("run_pipeline：普通模式输出每文件结果行与汇总") {
-  ntfscompact_test::TempDir tmp_dir;
-  REQUIRE(tmp_dir.ok());
-  REQUIRE(tmp_dir.WriteFile(L"plain.bin", 8192));
-  REQUIRE(tmp_dir.WriteFile(L"wof8k.bin", 8192));
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"plain.bin", 8192));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"wof8k.bin", 8192));
 
   Options opt_case{compress_options()};
-  opt_case.vec_paths.push_back(tmp_dir.path());
+  opt_case.vec_paths.push_back(ntfscompact_test::temp_path(tmp_dir));
   const DetectFn fn_detect{fake_detect};
   ExecuteRecorder recorder{};
   std::FILE* f_out{std::tmpfile()};
   REQUIRE(f_out != nullptr);
-  const int i4_code{run_pipeline(opt_case, fn_detect, recorder.fn(),
+  const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
                                 UncompressFn{}, f_out, f_out)};
   CHECK(i4_code == 0);
 
@@ -390,14 +390,14 @@ TEST_CASE("run_pipeline：普通模式输出每文件结果行与汇总") {
 }
 
 TEST_CASE("run_pipeline：失败路径计入退出码 1，失败行照打") {
-  ntfscompact_test::TempDir tmp_dir;
-  REQUIRE(tmp_dir.ok());
-  REQUIRE(tmp_dir.MakeDir(L"sub"));
-  REQUIRE(tmp_dir.WriteFile(L"sub\\ghost.bin", 8192));
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  REQUIRE(ntfscompact_test::temp_make_dir(tmp_dir, L"sub"));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"sub\\ghost.bin", 8192));
 
   Options opt_case{compress_options()};
-  opt_case.vec_paths.push_back(tmp_dir.path());
-  opt_case.vec_paths.push_back(tmp_dir.Sub(L"ghost.bin"));
+  opt_case.vec_paths.push_back(ntfscompact_test::temp_path(tmp_dir));
+  opt_case.vec_paths.push_back(ntfscompact_test::temp_sub(tmp_dir, L"ghost.bin"));
   const DetectFn fn_detect{fake_detect};
   ExecuteRecorder recorder{};
 
@@ -405,7 +405,7 @@ TEST_CASE("run_pipeline：失败路径计入退出码 1，失败行照打") {
   std::FILE* f_err{std::tmpfile()};
   REQUIRE(f_out != nullptr);
   REQUIRE(f_err != nullptr);
-  const int i4_code{run_pipeline(opt_case, fn_detect, recorder.fn(),
+  const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
                                 UncompressFn{}, f_out, f_err)};
   CHECK(i4_code == 1);
 
@@ -417,18 +417,18 @@ TEST_CASE("run_pipeline：失败路径计入退出码 1，失败行照打") {
 }
 
 TEST_CASE("run_pipeline：-q 静默不输出") {
-  ntfscompact_test::TempDir tmp_dir;
-  REQUIRE(tmp_dir.ok());
-  REQUIRE(tmp_dir.WriteFile(L"plain.bin", 8192));
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"plain.bin", 8192));
 
   Options opt_case{compress_options()};
   opt_case.b_quiet = true;
-  opt_case.vec_paths.push_back(tmp_dir.path());
+  opt_case.vec_paths.push_back(ntfscompact_test::temp_path(tmp_dir));
   const DetectFn fn_detect{fake_detect};
   ExecuteRecorder recorder{};
   std::FILE* f_out{std::tmpfile()};
   REQUIRE(f_out != nullptr);
-  const int i4_code{run_pipeline(opt_case, fn_detect, recorder.fn(),
+  const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
                                 UncompressFn{}, f_out, f_out)};
   std::fclose(f_out);
   CHECK(i4_code == 0);
