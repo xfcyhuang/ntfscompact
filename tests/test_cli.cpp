@@ -153,6 +153,29 @@ TEST_CASE("无路径参数与未知选项为用法错误（退出码 2 语义）
     }
 }
 
+TEST_CASE("-u 与 -a 同现为用法错误（工单 #5：解压模式不指定算法）") {
+    SUBCASE("-u 在前 -a 在后") {
+        const auto r = ParseArgs({L"-u", L"-a", L"lzx", L"p"});
+        CHECK_FALSE(r.ok);
+        CHECK_FALSE(r.error.empty());
+    }
+    SUBCASE("-a 在前 -u 在后") {
+        const auto r = ParseArgs({L"-a", L"lzx", L"-u", L"p"});
+        CHECK_FALSE(r.ok);
+        CHECK_FALSE(r.error.empty());
+    }
+    SUBCASE("-u -a lzx 无路径也报互斥（优先于缺路径）") {
+        const auto r = ParseArgs({L"-u", L"-a", L"lzx"});
+        CHECK_FALSE(r.ok);
+        CHECK_FALSE(r.error.empty());
+    }
+    SUBCASE("仅 -u 无 -a 仍合法") {
+        const auto r = ParseArgs({L"-u", L"p"});
+        REQUIRE(r.ok);
+        CHECK(r.options.uncompress);
+    }
+}
+
 TEST_CASE("--help 与 --version 请求") {
     SUBCASE("--help 无路径也合法") {
         const auto r = ParseArgs({L"--help"});

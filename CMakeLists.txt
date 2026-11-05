@@ -11,15 +11,15 @@ add_compile_options(-Wall -Wextra -Wpedantic -Wno-reserved-module-identifier -ff
 add_link_options(-Wl,--gc-sections)
 
 # 解析层（及后续管线）作为静态库，供可执行文件与单元测试共用
-add_library(ntfscompact_core STATIC src/cli.cpp src/scan.cpp src/detector.cpp src/pipeline.cpp src/executor.cpp)
+add_library(ntfscompact_core STATIC src/cli.cpp src/scan.cpp src/detector.cpp src/pipeline.cpp src/executor.cpp src/uncompress.cpp)
 target_include_directories(ntfscompact_core PUBLIC src)
 
 add_executable(ntfscompact src/main.cpp)
 target_link_libraries(ntfscompact PRIVATE ntfscompact_core)
-# 宽字符入口 wmain，原生保留任意（含中文）路径
 target_link_options(ntfscompact PRIVATE -municode)
 
 enable_testing()
+
 add_executable(ntfscompact_tests tests/test_cli.cpp)
 target_link_libraries(ntfscompact_tests PRIVATE ntfscompact_core)
 add_test(NAME cli_parse COMMAND ntfscompact_tests)
@@ -39,6 +39,10 @@ add_test(NAME scan_traverse COMMAND ntfscompact_scan_tests)
 add_executable(ntfscompact_detector_tests tests/test_detector.cpp)
 target_link_libraries(ntfscompact_detector_tests PRIVATE ntfscompact_core)
 add_test(NAME detector_real COMMAND ntfscompact_detector_tests)
+
+add_executable(ntfscompact_uncompress_tests tests/test_uncompress.cpp)
+target_link_libraries(ntfscompact_uncompress_tests PRIVATE ntfscompact_core)
+add_test(NAME uncompress_real COMMAND ntfscompact_uncompress_tests)
 
 add_executable(ntfscompact_run_tests tests/test_run.cpp)
 target_link_libraries(ntfscompact_run_tests PRIVATE ntfscompact_core)

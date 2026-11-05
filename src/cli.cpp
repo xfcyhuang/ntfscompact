@@ -5,6 +5,7 @@ namespace ntfscompact {
 
 ParseResult ParseArgs(const std::vector<std::wstring>& args) {
     ParseResult result;
+    bool has_algorithm{false};
     for (size_t i = 0; i < args.size(); ++i) {
         const std::wstring& arg = args[i];
         if (arg == L"-a") {
@@ -26,7 +27,16 @@ ParseResult ParseArgs(const std::vector<std::wstring>& args) {
                 result.error = L"非法算法值 '" + value + L"'（应为 xpress4k|xpress8k|xpress16k|lzx）";
                 return result;
             }
+            has_algorithm = true;
+            if (result.options.uncompress) {
+                result.error = L"选项 -a 与 -u 互斥：解压模式不指定算法";
+                return result;
+            }
         } else if (arg == L"-u") {
+            if (has_algorithm) {
+                result.error = L"选项 -a 与 -u 互斥：解压模式不指定算法";
+                return result;
+            }
             result.options.uncompress = true;
         } else if (arg == L"-n") {
             result.options.dry_run = true;
@@ -65,7 +75,7 @@ std::wstring UsageText() {
            L"\n"
            L"选项：\n"
            L"  -a <算法>   指定算法：xpress4k | xpress8k | xpress16k | lzx（默认 xpress8k）\n"
-           L"  -u          解压：解除压缩，恢复常规存储\n"
+           L"  -u          解压：解除压缩，恢复常规存储（与 -a 互斥）\n"
            L"  -n          干跑：只报告，不修改\n"
            L"  -q          静默：不输出\n"
            L"  -v          详细输出\n"

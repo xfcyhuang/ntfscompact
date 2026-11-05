@@ -59,32 +59,52 @@ PipelineResult RunScan(const Options& options, IDetector& detector) {
 }
 
 int RunPipeline(const Options& options, IDetector& detector,
-                const ExecuteFn& fn_execute, std::FILE* out, std::FILE* err) {
+                const ExecuteFn& fn_execute, const UncompressFn& fn_uncompress,
+                std::FILE* out, std::FILE* err) {
   PipelineResult result = RunScan(options, detector);
 
   if (!options.dry_run) {
     for (FileReport& fr_report : result.reports) {
       if (!fr_report.error.empty()) continue;
-      if (fr_report.plan.action != Plan::Action::Compress &&
-          fr_report.plan.action != Plan::Action::Recompress) {
-        continue;
-      }
-      fr_report.er_exec = fn_execute(fr_report.str_long_path,
-                                     fr_report.plan.action, fr_report.state,
-                                     options.algorithm);
-      fr_report.b_executed = true;
-      if (fr_report.er_exec.e_outcome == ExecuteResult::Outcome::kError) {
-        ++result.failures;
+      switch (fr_report.plan.action) {
+        case Plan::Action::Compress:
+        case Plan::Action::Recompress:
+          fr_report.er_exec = fn_execute(fr_report.str_long_path,
+                                         fr_report.plan.action,
+                                         fr_report.state, options.algorithm);
+          fr_report.b_executed = true;
+          if (fr_report.er_exec.e_outcome == ExecuteResult::Outcome::kError) {
+            ++result.failures;
+          }
+          break;
+        case Plan::Action::Uncompress: {
+          if (!fn_uncompress) {
+            fr_report.error = L"解压器未接线";
+            ++result.failures;
+            break;
+          }
+          const std::expected<void, std::wstring> xe_uncompress{
+              fn_uncompress(fr_report.str_long_path)};
+          if (!xe_uncompress.has_value()) {
+            fr_report.error = xe_uncompress.error();
+            ++result.failures;
+          }
+          break;
+        }
+        case Plan::Action::Skip:
+          break;
       }
     }
   }
 
   if (!options.quiet) {
-    for (const FileReport& r : result.reports) {
-      const bool b_to_err =
-          !r.error.empty() ||
-          (r.b_executed && r.er_exec.e_outcome == ExecuteResult::Outcome::kError);
-      WriteUtf8(b_to_err ? err : out, FormatReportLine(r, options) + L"\n");
+    if (options.dry_run || options.verbose || !options.uncompress) {
+      for (const FileReport& r : result.reports) {
+        const bool b_to_err =
+            !r.error.empty() ||
+            (r.b_executed && r.er_exec.e_outcome == ExecuteResult::Outcome::kError);
+        WriteUtf8(b_to_err ? err : out, FormatReportLine(r, options) + L"\n");
+      }
     }
     WriteUtf8(out, FormatSummary(result) + L"\n");
   }

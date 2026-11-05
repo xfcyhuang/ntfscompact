@@ -7,6 +7,7 @@
 #include "cli.h"
 #include "detect.h"
 #include "executor.hpp"
+#include "uncompress.hpp"
 
 namespace ntfscompact {
 
@@ -121,6 +122,7 @@ PipelineResult RunScan(const Options& options, IDetector& detector);
 void WriteUtf8(std::FILE* stream, const std::wstring& text);
 
 int RunPipeline(const Options& options, IDetector& detector,
-                const ExecuteFn& fn_execute, std::FILE* out, std::FILE* err);
+                const ExecuteFn& fn_execute, const UncompressFn& fn_uncompress,
+                std::FILE* out, std::FILE* err);
 
 }

@@ -41,5 +41,12 @@ int wmain(int argc, wchar_t** argv) {
     }
     fn_execute = std::move(xe_executor.value());
   }
-  return RunPipeline(r.options, detector_real, fn_execute, stdout, stderr);
+  auto xe_uncompressor{make_real_uncompressor()};
+  if (!xe_uncompressor.has_value()) {
+    WriteUtf8(stderr, L"ntfscompact: " + xe_uncompressor.error() + L"\n");
+    return 1;
+  }
+  UncompressFn fn_uncompress{std::move(xe_uncompressor.value())};
+  return RunPipeline(r.options, detector_real, fn_execute, fn_uncompress,
+                     stdout, stderr);
 }
