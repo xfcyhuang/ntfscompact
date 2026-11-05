@@ -4,7 +4,7 @@
 // 不依赖真实压缩状态。
 #pragma once
 
-#include <string>
+import std;
 
 #include "cli.hpp"
 

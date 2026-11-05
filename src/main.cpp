@@ -2,10 +2,6 @@
 #include "pipeline.hpp"
 
 #include <cstdio>
-#include <string>
-#include <vector>
-
-#include <windows.h>
 
 int wmain(int argc, wchar_t** argv) {
   using namespace ntfscompact;

@@ -4,9 +4,8 @@
 // NTFS 目录环必经 reparse point，故不进入即防环；路径内部规范化为 \\?\ 长路径。
 #pragma once
 
-#include <cstdint>
-#include <string>
-#include <vector>
+import std;
+
 #include <windows.h>
 
 namespace ntfscompact {
@@ -15,7 +14,7 @@ namespace ntfscompact {
 struct ScanItem {
     std::wstring long_path;     // \\?\ 规范长路径，检测/后续压缩用
     std::wstring display_path;  // 显示路径（去 \\?\ 前缀）
-    uint64_t size = 0;          // 逻辑大小（字节）
+    std::uint64_t size = 0;          // 逻辑大小（字节）
 };
 
 // 跳过记录（GLOSSARY「跳过」：不做任何修改，仅记录）
@@ -41,7 +40,7 @@ struct FileMetadata {
     std::wstring display_path;
     DWORD attributes = 0;    // dwFileAttributes
     DWORD reparse_tag = 0;   // dwReserved0（属性含 REPARSE_POINT 时有效）
-    uint64_t size = 0;       // nFileSize{Low,High}
+    std::uint64_t size = 0;       // nFileSize{Low,High}
 };
 
 // 单文件过滤判定（纯函数，便于合成属性单测）：黑名单文件名（pagefile/hiberfil/

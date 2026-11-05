@@ -6,7 +6,6 @@
 
 #include "pipeline.hpp"
 
-#include <string>
 #include <windows.h>
 
 namespace {

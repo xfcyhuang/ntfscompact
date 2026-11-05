@@ -6,7 +6,7 @@ namespace ntfscompact {
 ParseResult ParseArgs(const std::vector<std::wstring>& args) {
     ParseResult result;
     bool has_algorithm{false};
-    for (size_t i = 0; i < args.size(); ++i) {
+    for (std::size_t i = 0; i < args.size(); ++i) {
         const std::wstring& arg = args[i];
         if (arg == L"-a") {
             ++i;

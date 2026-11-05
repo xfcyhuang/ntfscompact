@@ -18,7 +18,7 @@ std::string narrow(const std::wstring& str_wide) {
   const int i_bytes{WideCharToMultiByte(CP_UTF8, 0, str_wide.data(),
                                         static_cast<int>(str_wide.size()), nullptr, 0,
                                         nullptr, nullptr)};
-  std::string str_utf8(static_cast<size_t>(i_bytes), '\0');
+  std::string str_utf8(static_cast<std::size_t>(i_bytes), '\0');
   if (i_bytes > 0) {
     WideCharToMultiByte(CP_UTF8, 0, str_wide.data(), static_cast<int>(str_wide.size()),
                         str_utf8.data(), i_bytes, nullptr, nullptr);
@@ -97,11 +97,11 @@ std::wstring read_stream(std::FILE* f_stream) {
   std::rewind(f_stream);
   std::wstring str_content{};
   char vec_buf[4096]{};
-  size_t n_read{};
+  std::size_t n_read{};
   while ((n_read = std::fread(vec_buf, 1, sizeof(vec_buf), f_stream)) > 0) {
     const int i_wchars{MultiByteToWideChar(CP_UTF8, 0, vec_buf,
                                            static_cast<int>(n_read), nullptr, 0)};
-    std::wstring str_chunk(static_cast<size_t>(i_wchars), L'\0');
+    std::wstring str_chunk(static_cast<std::size_t>(i_wchars), L'\0');
     MultiByteToWideChar(CP_UTF8, 0, vec_buf, static_cast<int>(n_read), str_chunk.data(),
                         i_wchars);
     str_content += str_chunk;

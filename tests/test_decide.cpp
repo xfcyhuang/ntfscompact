@@ -6,7 +6,6 @@
 
 #include "detect.hpp"
 
-#include <string>
 #include <windows.h>
 
 namespace {

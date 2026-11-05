@@ -4,7 +4,7 @@
 namespace ntfscompact {
 namespace {
 
-constexpr uint64_t kMinCompressibleSize = 4096;  // ≤4KB 跳过
+constexpr std::uint64_t kMinCompressibleSize = 4096;  // ≤4KB 跳过
 
 #ifndef IO_REPARSE_TAG_WOF
 #define IO_REPARSE_TAG_WOF (0x80000017u)
@@ -12,7 +12,7 @@ constexpr uint64_t kMinCompressibleSize = 4096;  // ≤4KB 跳过
 
 // 系统关键文件黑名单（文件名级，大小写不敏感）
 bool IsCriticalSystemFile(const std::wstring& display_path) {
-    const size_t sep = display_path.find_last_of(L"\\/");
+    const std::size_t sep = display_path.find_last_of(L"\\/");
     const std::wstring name =
         sep == std::wstring::npos ? display_path : display_path.substr(sep + 1);
     return lstrcmpiW(name.c_str(), L"pagefile.sys") == 0 ||
@@ -22,9 +22,9 @@ bool IsCriticalSystemFile(const std::wstring& display_path) {
 
 // 路径任一组件为 WinSxS（大小写不敏感，按组件精确匹配，前缀相似不误伤）
 bool HasWinSxSComponent(const std::wstring& display_path) {
-    size_t begin = 0;
+    std::size_t begin = 0;
     while (begin <= display_path.size()) {
-        const size_t end = display_path.find_first_of(L"\\/", begin);
+        const std::size_t end = display_path.find_first_of(L"\\/", begin);
         const std::wstring comp =
             display_path.substr(begin, end == std::wstring::npos
                                            ? std::wstring::npos
@@ -66,7 +66,7 @@ bool HasWildcard(const std::wstring& path) {
     return path.find_first_of(L"*?") != std::wstring::npos;
 }
 
-uint64_t FindDataSize(const WIN32_FIND_DATAW& fd) {
+std::uint64_t FindDataSize(const WIN32_FIND_DATAW& fd) {
     ULARGE_INTEGER n{};
     n.LowPart = fd.nFileSizeLow;
     n.HighPart = fd.nFileSizeHigh;
@@ -159,7 +159,7 @@ void HandleExplicitPath(const std::wstring& raw, ScanOutcome& out) {
 
 // 通配符参数：仅匹配该层文件（目录不递归，对齐 compact.exe 语义）
 void HandleWildcard(const std::wstring& raw, ScanOutcome& out) {
-    const size_t sep = raw.find_last_of(L"\\/");
+    const std::size_t sep = raw.find_last_of(L"\\/");
     const std::wstring file_pattern =
         sep == std::wstring::npos ? raw : raw.substr(sep + 1);
     const std::wstring dir_part = [&]() -> std::wstring {
@@ -200,7 +200,7 @@ void HandleWildcard(const std::wstring& raw, ScanOutcome& out) {
 
 bool CheckFileCandidate(const FileMetadata& metadata, std::wstring* skip_reason) {
     if (IsCriticalSystemFile(metadata.display_path)) {
-        const size_t sep = metadata.display_path.find_last_of(L"\\/");
+        const std::size_t sep = metadata.display_path.find_last_of(L"\\/");
         *skip_reason = L"系统关键文件（" +
                        (sep == std::wstring::npos
                             ? metadata.display_path
@@ -209,7 +209,7 @@ bool CheckFileCandidate(const FileMetadata& metadata, std::wstring* skip_reason)
         return false;
     }
     // 文件判定只看目录部分（最后一段是文件名，文件名本身叫 WinSxS 不误伤）
-    const size_t sep = metadata.display_path.find_last_of(L"\\/");
+    const std::size_t sep = metadata.display_path.find_last_of(L"\\/");
     const std::wstring dir_part =
         sep == std::wstring::npos ? std::wstring()
                                   : metadata.display_path.substr(0, sep);

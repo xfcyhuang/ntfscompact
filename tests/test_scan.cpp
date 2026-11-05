@@ -7,15 +7,12 @@
 #include "scan.hpp"
 #include "temp_dir.hpp"
 
-#include <algorithm>
-#include <string>
-#include <vector>
 #include <windows.h>
 
 namespace {
 
 std::wstring Basename(const std::wstring& path) {
-    const size_t p = path.find_last_of(L"\\/");
+    const std::size_t p = path.find_last_of(L"\\/");
     return p == std::wstring::npos ? path : path.substr(p + 1);
 }
 
@@ -165,7 +162,7 @@ constexpr DWORD kReparseTagSymlink = 0xA000000C;  // IO_REPARSE_TAG_SYMLINK
 constexpr DWORD kReparseTagWof = 0x80000017;      // IO_REPARSE_TAG_WOF
 constexpr DWORD kReparseTagMountPoint = 0xA0000003;
 
-FileMetadata Meta(const std::wstring& path, uint64_t size, DWORD attrs = 0,
+FileMetadata Meta(const std::wstring& path, std::uint64_t size, DWORD attrs = 0,
                   DWORD tag = 0) {
     FileMetadata m;
     m.display_path = path;

@@ -115,12 +115,12 @@ std::wstring read_all(std::FILE* f_stream) {
   std::rewind(f_stream);
   std::wstring str_content{};
   char buf_bytes[4096]{};
-  size_t n_bytes{0};
+  std::size_t n_bytes{0};
   while ((n_bytes = std::fread(buf_bytes, 1, sizeof(buf_bytes), f_stream)) > 0) {
     const int i4_wchars{MultiByteToWideChar(CP_UTF8, 0, buf_bytes,
                                             static_cast<int>(n_bytes), nullptr,
                                             0)};
-    std::wstring str_chunk(static_cast<size_t>(i4_wchars), L'\0');
+    std::wstring str_chunk(static_cast<std::size_t>(i4_wchars), L'\0');
     MultiByteToWideChar(CP_UTF8, 0, buf_bytes, static_cast<int>(n_bytes),
                         str_chunk.data(), i4_wchars);
     str_content += str_chunk;

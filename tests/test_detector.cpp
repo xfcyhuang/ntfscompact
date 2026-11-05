@@ -10,8 +10,6 @@
 #include "detect.hpp"
 #include "temp_dir.hpp"
 
-#include <cstdio>
-#include <string>
 #include <windows.h>
 
 namespace {

@@ -2,10 +2,9 @@
 // 清理对 reparse 目录只删除 junction 本身、不进入（与产品遍历同一防环原则）。
 #pragma once
 
-#include <windows.h>
+import std;
 
-#include <cstdio>
-#include <string>
+#include <windows.h>
 
 namespace ntfscompact_test {
 
@@ -52,9 +51,9 @@ public:
         if (CreateDirectoryW(LongApiPath(full).c_str(), nullptr)) return true;
         // 逐级建（SHCreateDirectory 不引入，手工拆分）
         std::wstring cur;
-        size_t i = 0;
+        std::size_t i = 0;
         while (i < full.size()) {
-            const size_t next = full.find(L'\\', i);
+            const std::size_t next = full.find(L'\\', i);
             if (next == std::wstring::npos) break;
             if (next > 0) {
                 cur = full.substr(0, next);

@@ -2,8 +2,7 @@
 // 仅负责解析：不压缩、不遍历文件系统，无任何 I/O 副作用。
 #pragma once
 
-#include <string>
-#include <vector>
+import std;
 
 namespace ntfscompact {
 
