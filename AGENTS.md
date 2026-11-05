@@ -4,6 +4,7 @@
 
 ## 代码门禁
 
+- 代码规范以 Z:/source_code/cpp26.md 为准（C++26；自由函数 + 聚合 struct，无 class 封装；import std;；std::expected 无异常；类型前缀命名；指定编译旗标）。
 - 代码一律不写注释（// 与 /* */ 全禁）。命名自解释；解释性内容进 commit message、issue、文档。
 - 字符串与用户可见输出文本不算注释。
 
