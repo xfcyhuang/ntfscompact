@@ -1,52 +1,54 @@
-#include "cli.h"
-#include "pipeline.h"
+#include "cli.hpp"
+#include "pipeline.hpp"
 
 #include <cstdio>
-#include <string>
-#include <vector>
-
-#include <windows.h>
 
 int wmain(int argc, wchar_t** argv) {
-  using namespace ntfscompact;
+  const ntfscompact::ParseResult pr_parse{
+      ntfscompact::parse_args(std::vector<std::wstring>(argv + 1, argv + argc))};
 
-  const ParseResult r = ParseArgs(std::vector<std::wstring>(argv + 1, argv + argc));
-
-  if (r.want_help) {
-    WriteUtf8(stdout, UsageText());
+  if (pr_parse.b_want_help) {
+    ntfscompact::write_utf8(stdout, ntfscompact::usage_text());
     return 0;
   }
-  if (r.want_version) {
-    WriteUtf8(stdout, L"ntfscompact " + std::wstring(kVersion) + L"\n");
+  if (pr_parse.b_want_version) {
+    ntfscompact::write_utf8(stdout,
+                            L"ntfscompact " + std::wstring(ntfscompact::kVersion) +
+                                L"\n");
     return 0;
   }
-  if (!r.ok) {
-    WriteUtf8(stderr, L"ntfscompact: " + r.error + L"\n\n");
-    WriteUtf8(stderr, UsageText());
+  if (!pr_parse.b_ok) {
+    ntfscompact::write_utf8(stderr,
+                            L"ntfscompact: " + pr_parse.str_error + L"\n\n");
+    ntfscompact::write_utf8(stderr, ntfscompact::usage_text());
     return 2;
   }
 
-  std::wstring str_detector_error{};
-  RealDetector detector_real{&str_detector_error};
-  if (!str_detector_error.empty()) {
-    WriteUtf8(stderr, L"ntfscompact: " + str_detector_error + L"\n");
+  auto xe_detector{ntfscompact::make_real_detector()};
+  if (!xe_detector.has_value()) {
+    ntfscompact::write_utf8(stderr,
+                            L"ntfscompact: " + std::move(xe_detector).error() +
+                                L"\n");
     return 1;
   }
-  ExecuteFn fn_execute{};
-  if (!r.options.dry_run) {
-    auto xe_executor{make_real_executor()};
+  ntfscompact::DetectFn fn_detect{std::move(xe_detector).value()};
+  ntfscompact::ExecuteFn fn_execute{};
+  if (!pr_parse.opt_options.b_dry_run) {
+    auto xe_executor{ntfscompact::make_real_executor()};
     if (!xe_executor.has_value()) {
-      WriteUtf8(stderr, L"ntfscompact: " + xe_executor.error() + L"\n");
+      ntfscompact::write_utf8(
+          stderr, L"ntfscompact: " + std::move(xe_executor).error() + L"\n");
       return 1;
     }
-    fn_execute = std::move(xe_executor.value());
+    fn_execute = std::move(xe_executor).value();
   }
-  auto xe_uncompressor{make_real_uncompressor()};
+  auto xe_uncompressor{ntfscompact::make_real_uncompressor()};
   if (!xe_uncompressor.has_value()) {
-    WriteUtf8(stderr, L"ntfscompact: " + xe_uncompressor.error() + L"\n");
+    ntfscompact::write_utf8(
+        stderr, L"ntfscompact: " + std::move(xe_uncompressor).error() + L"\n");
     return 1;
   }
-  UncompressFn fn_uncompress{std::move(xe_uncompressor.value())};
-  return RunPipeline(r.options, detector_real, fn_execute, fn_uncompress,
-                     stdout, stderr);
+  ntfscompact::UncompressFn fn_uncompress{std::move(xe_uncompressor).value()};
+  return ntfscompact::run_pipeline(pr_parse.opt_options, fn_detect, fn_execute,
+                                   fn_uncompress, stdout, stderr);
 }

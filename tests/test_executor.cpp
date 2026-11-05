@@ -2,7 +2,7 @@
 #include "doctest.h"
 
 #include "executor.hpp"
-#include "temp_dir.h"
+#include "temp_dir.hpp"
 
 #include <cstdlib>
 #include <windows.h>
@@ -15,7 +15,8 @@ using ntfscompact::DetectionResult;
 using ntfscompact::ExecuteFn;
 using ntfscompact::ExecuteResult;
 using ntfscompact::Plan;
-using ntfscompact::RealDetector;
+using ntfscompact::DetectFn;
+using ntfscompact::make_real_detector;
 using ntfscompact::check_compression_meets_target;
 using ntfscompact::make_real_executor;
 
@@ -38,7 +39,7 @@ int run_compact(const std::wstring& str_args) {
 }
 
 bool write_compressible(const std::wstring& str_path) {
-  HANDLE h_file{CreateFileW(ntfscompact_test::TempDir::LongApiPath(str_path).c_str(),
+  HANDLE h_file{CreateFileW(ntfscompact_test::temp_long_api_path(str_path).c_str(),
                             GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
                             FILE_ATTRIBUTE_NORMAL, nullptr)};
   if (h_file == INVALID_HANDLE_VALUE) {
@@ -63,7 +64,7 @@ bool write_compressible(const std::wstring& str_path) {
 }
 
 bool write_incompressible(const std::wstring& str_path) {
-  HANDLE h_file{CreateFileW(ntfscompact_test::TempDir::LongApiPath(str_path).c_str(),
+  HANDLE h_file{CreateFileW(ntfscompact_test::temp_long_api_path(str_path).c_str(),
                             GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
                             FILE_ATTRIBUTE_NORMAL, nullptr)};
   if (h_file == INVALID_HANDLE_VALUE) {
@@ -91,7 +92,7 @@ bool write_incompressible(const std::wstring& str_path) {
 
 DWORD get_attrs(const std::wstring& str_path) {
   return GetFileAttributesW(
-      ntfscompact_test::TempDir::LongApiPath(str_path).c_str());
+      ntfscompact_test::temp_long_api_path(str_path).c_str());
 }
 
 bool is_wof_form(const std::wstring& str_path) {
@@ -118,29 +119,29 @@ bool has(const std::string& str_haystack, const char* ptr_needle) {
 
 TEST_CASE("check_compression_meets_target：达到指定算法返回空串") {
   CHECK(narrow(check_compression_meets_target(
-            true, CurrentState::kProviderFile, Algorithm::Xpress8k,
-            Algorithm::Xpress8k))
+            true, CurrentState::kProviderFile, Algorithm::kXpress8k,
+            Algorithm::kXpress8k))
             .empty());
   CHECK(narrow(check_compression_meets_target(
-            true, CurrentState::kProviderFile, Algorithm::Lzx, Algorithm::Lzx))
+            true, CurrentState::kProviderFile, Algorithm::kLzx, Algorithm::kLzx))
             .empty());
 }
 
 TEST_CASE("check_compression_meets_target：静默未压缩报不符") {
   const std::wstring str_msg{check_compression_meets_target(
-      false, 0, Algorithm::Xpress4k, Algorithm::Xpress8k)};
+      false, 0, Algorithm::kXpress4k, Algorithm::kXpress8k)};
   CHECK(has(narrow(str_msg), "复核失败"));
 }
 
 TEST_CASE("check_compression_meets_target：provider 非 WOF FILE 报不符") {
   const std::wstring str_msg{check_compression_meets_target(
-      true, CurrentState::kProviderWim, Algorithm::Xpress8k, Algorithm::Xpress8k)};
+      true, CurrentState::kProviderWim, Algorithm::kXpress8k, Algorithm::kXpress8k)};
   CHECK(has(narrow(str_msg), "复核失败"));
 }
 
 TEST_CASE("check_compression_meets_target：算法不符报双方算法名") {
   const std::wstring str_msg{check_compression_meets_target(
-      true, CurrentState::kProviderFile, Algorithm::Lzx, Algorithm::Xpress8k)};
+      true, CurrentState::kProviderFile, Algorithm::kLzx, Algorithm::kXpress8k)};
   const std::string str_narrow{narrow(str_msg)};
   CHECK(has(str_narrow, "复核失败"));
   CHECK(has(str_narrow, "lzx"));
@@ -154,135 +155,135 @@ TEST_CASE("make_real_executor：wofutil.dll 动态加载成功") {
 }
 
 TEST_CASE("普通文件压缩后 WofIsExternalFile 报告指定算法") {
-  ntfscompact_test::TempDir tmp_dir;
-  REQUIRE(tmp_dir.ok());
-  REQUIRE(make_plain(tmp_dir.Sub(L"plain.bin")));
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  REQUIRE(make_plain(ntfscompact_test::temp_sub(tmp_dir, L"plain.bin")));
 
   auto xe_executor{make_real_executor()};
   REQUIRE(xe_executor.has_value());
   ExecuteFn fn_execute{std::move(xe_executor.value())};
   CurrentState cs_plain{};
   const ExecuteResult er_result{fn_execute(
-      tmp_dir.Sub(L"plain.bin"), Plan::Action::Compress, cs_plain,
-      Algorithm::Xpress8k)};
+      ntfscompact_test::temp_sub(tmp_dir, L"plain.bin"), Plan::Action::kCompress, cs_plain,
+      Algorithm::kXpress8k)};
   CHECK(er_result.e_outcome == ExecuteResult::Outcome::kSuccess);
   CHECK(narrow(er_result.str_message).empty());
 
-  std::wstring str_detector_error{};
-  RealDetector detector_check{&str_detector_error};
-  REQUIRE(narrow(str_detector_error).empty());
-  const DetectionResult dr_verified{detector_check.Detect(tmp_dir.Sub(L"plain.bin"))};
-  CHECK(narrow(dr_verified.error).empty());
-  CHECK(dr_verified.state.kind == CurrentState::Kind::Wof);
-  CHECK(dr_verified.state.provider == CurrentState::kProviderFile);
-  CHECK(dr_verified.state.algorithm == Algorithm::Xpress8k);
+  auto xe_detector{make_real_detector()};
+  REQUIRE(xe_detector.has_value());
+  const DetectFn fn_detect{std::move(xe_detector).value()};
+  const DetectionResult dr_verified{fn_detect(ntfscompact_test::temp_sub(tmp_dir, L"plain.bin"))};
+  CHECK(narrow(dr_verified.str_error).empty());
+  CHECK(dr_verified.cs_state.e_kind == CurrentState::Kind::kWof);
+  CHECK(dr_verified.cs_state.i4_provider == CurrentState::kProviderFile);
+  CHECK(dr_verified.cs_state.e_algorithm == Algorithm::kXpress8k);
 }
 
 TEST_CASE("指定算法 lzx 时压缩终态为 lzx") {
-  ntfscompact_test::TempDir tmp_dir;
-  REQUIRE(tmp_dir.ok());
-  REQUIRE(make_plain(tmp_dir.Sub(L"lzx_target.bin")));
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  REQUIRE(make_plain(ntfscompact_test::temp_sub(tmp_dir, L"lzx_target.bin")));
 
   auto xe_executor{make_real_executor()};
   REQUIRE(xe_executor.has_value());
   ExecuteFn fn_execute{std::move(xe_executor.value())};
   CurrentState cs_plain{};
-  const ExecuteResult er_result{fn_execute(tmp_dir.Sub(L"lzx_target.bin"),
-                                            Plan::Action::Compress, cs_plain,
-                                            Algorithm::Lzx)};
+  const ExecuteResult er_result{fn_execute(ntfscompact_test::temp_sub(tmp_dir, L"lzx_target.bin"),
+                                            Plan::Action::kCompress, cs_plain,
+                                            Algorithm::kLzx)};
   CHECK(er_result.e_outcome == ExecuteResult::Outcome::kSuccess);
 
-  std::wstring str_detector_error{};
-  RealDetector detector_check{&str_detector_error};
-  REQUIRE(narrow(str_detector_error).empty());
+  auto xe_detector{make_real_detector()};
+  REQUIRE(xe_detector.has_value());
+  const DetectFn fn_detect{std::move(xe_detector).value()};
   const DetectionResult dr_verified{
-      detector_check.Detect(tmp_dir.Sub(L"lzx_target.bin"))};
-  CHECK(dr_verified.state.kind == CurrentState::Kind::Wof);
-  CHECK(dr_verified.state.algorithm == Algorithm::Lzx);
+      fn_detect(ntfscompact_test::temp_sub(tmp_dir, L"lzx_target.bin"))};
+  CHECK(dr_verified.cs_state.e_kind == CurrentState::Kind::kWof);
+  CHECK(dr_verified.cs_state.e_algorithm == Algorithm::kLzx);
 }
 
 TEST_CASE("LZNT1 文件重压后终态为指定算法") {
-  ntfscompact_test::TempDir tmp_dir;
-  REQUIRE(tmp_dir.ok());
-  REQUIRE(make_plain(tmp_dir.Sub(L"lznt1.bin")));
-  REQUIRE(run_compact(L"/c \"" + tmp_dir.Sub(L"lznt1.bin") + L"\"") == 0);
-  REQUIRE((get_attrs(tmp_dir.Sub(L"lznt1.bin")) & FILE_ATTRIBUTE_COMPRESSED) != 0);
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  REQUIRE(make_plain(ntfscompact_test::temp_sub(tmp_dir, L"lznt1.bin")));
+  REQUIRE(run_compact(L"/c \"" + ntfscompact_test::temp_sub(tmp_dir, L"lznt1.bin") + L"\"") == 0);
+  REQUIRE((get_attrs(ntfscompact_test::temp_sub(tmp_dir, L"lznt1.bin")) & FILE_ATTRIBUTE_COMPRESSED) != 0);
 
   auto xe_executor{make_real_executor()};
   REQUIRE(xe_executor.has_value());
   ExecuteFn fn_execute{std::move(xe_executor.value())};
   CurrentState cs_lznt1{};
-  cs_lznt1.kind = CurrentState::Kind::Lznt1;
+  cs_lznt1.e_kind = CurrentState::Kind::kLznt1;
   const ExecuteResult er_result{fn_execute(
-      tmp_dir.Sub(L"lznt1.bin"), Plan::Action::Recompress, cs_lznt1,
-      Algorithm::Xpress8k)};
+      ntfscompact_test::temp_sub(tmp_dir, L"lznt1.bin"), Plan::Action::kRecompress, cs_lznt1,
+      Algorithm::kXpress8k)};
   CHECK_MESSAGE(er_result.e_outcome == ExecuteResult::Outcome::kSuccess,
                 narrow(er_result.str_message));
 
-  std::wstring str_detector_error{};
-  RealDetector detector_check{&str_detector_error};
-  REQUIRE(narrow(str_detector_error).empty());
-  const DetectionResult dr_verified{detector_check.Detect(tmp_dir.Sub(L"lznt1.bin"))};
-  CHECK(dr_verified.state.kind == CurrentState::Kind::Wof);
-  CHECK(dr_verified.state.provider == CurrentState::kProviderFile);
-  CHECK(dr_verified.state.algorithm == Algorithm::Xpress8k);
+  auto xe_detector{make_real_detector()};
+  REQUIRE(xe_detector.has_value());
+  const DetectFn fn_detect{std::move(xe_detector).value()};
+  const DetectionResult dr_verified{fn_detect(ntfscompact_test::temp_sub(tmp_dir, L"lznt1.bin"))};
+  CHECK(dr_verified.cs_state.e_kind == CurrentState::Kind::kWof);
+  CHECK(dr_verified.cs_state.i4_provider == CurrentState::kProviderFile);
+  CHECK(dr_verified.cs_state.e_algorithm == Algorithm::kXpress8k);
 }
 
 TEST_CASE("其他 WOF 算法文件重压后终态为指定算法") {
-  ntfscompact_test::TempDir tmp_dir;
-  REQUIRE(tmp_dir.ok());
-  REQUIRE(make_plain(tmp_dir.Sub(L"woflzx.bin")));
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  REQUIRE(make_plain(ntfscompact_test::temp_sub(tmp_dir, L"woflzx.bin")));
 
   auto xe_executor{make_real_executor()};
   REQUIRE(xe_executor.has_value());
   ExecuteFn fn_execute{std::move(xe_executor.value())};
   CurrentState cs_plain{};
-  const ExecuteResult er_setup{fn_execute(tmp_dir.Sub(L"woflzx.bin"),
-                                           Plan::Action::Compress, cs_plain,
-                                           Algorithm::Lzx)};
+  const ExecuteResult er_setup{fn_execute(ntfscompact_test::temp_sub(tmp_dir, L"woflzx.bin"),
+                                           Plan::Action::kCompress, cs_plain,
+                                           Algorithm::kLzx)};
   REQUIRE_MESSAGE(er_setup.e_outcome == ExecuteResult::Outcome::kSuccess,
                   narrow(er_setup.str_message));
 
-  std::wstring str_detector_error{};
-  RealDetector detector_check{&str_detector_error};
-  REQUIRE(narrow(str_detector_error).empty());
+  auto xe_detector{make_real_detector()};
+  REQUIRE(xe_detector.has_value());
+  const DetectFn fn_detect{std::move(xe_detector).value()};
   const DetectionResult dr_setup{
-      detector_check.Detect(tmp_dir.Sub(L"woflzx.bin"))};
-  REQUIRE(dr_setup.state.kind == CurrentState::Kind::Wof);
-  REQUIRE(dr_setup.state.algorithm == Algorithm::Lzx);
+      fn_detect(ntfscompact_test::temp_sub(tmp_dir, L"woflzx.bin"))};
+  REQUIRE(dr_setup.cs_state.e_kind == CurrentState::Kind::kWof);
+  REQUIRE(dr_setup.cs_state.e_algorithm == Algorithm::kLzx);
 
   CurrentState cs_wof{};
-  cs_wof.kind = CurrentState::Kind::Wof;
-  cs_wof.provider = CurrentState::kProviderFile;
-  cs_wof.algorithm = Algorithm::Lzx;
+  cs_wof.e_kind = CurrentState::Kind::kWof;
+  cs_wof.i4_provider = CurrentState::kProviderFile;
+  cs_wof.e_algorithm = Algorithm::kLzx;
   const ExecuteResult er_result{fn_execute(
-      tmp_dir.Sub(L"woflzx.bin"), Plan::Action::Recompress, cs_wof,
-      Algorithm::Xpress8k)};
+      ntfscompact_test::temp_sub(tmp_dir, L"woflzx.bin"), Plan::Action::kRecompress, cs_wof,
+      Algorithm::kXpress8k)};
   CHECK_MESSAGE(er_result.e_outcome == ExecuteResult::Outcome::kSuccess,
                 narrow(er_result.str_message));
 
   const DetectionResult dr_verified{
-      detector_check.Detect(tmp_dir.Sub(L"woflzx.bin"))};
-  CHECK(dr_verified.state.kind == CurrentState::Kind::Wof);
-  CHECK(dr_verified.state.algorithm == Algorithm::Xpress8k);
+      fn_detect(ntfscompact_test::temp_sub(tmp_dir, L"woflzx.bin"))};
+  CHECK(dr_verified.cs_state.e_kind == CurrentState::Kind::kWof);
+  CHECK(dr_verified.cs_state.e_algorithm == Algorithm::kXpress8k);
 }
 
 TEST_CASE("无收益文件计跳过不计错误") {
-  ntfscompact_test::TempDir tmp_dir;
-  REQUIRE(tmp_dir.ok());
-  REQUIRE(make_plain(tmp_dir.Sub(L"random.bin")));
-  REQUIRE(write_incompressible(tmp_dir.Sub(L"random.bin")));
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  REQUIRE(make_plain(ntfscompact_test::temp_sub(tmp_dir, L"random.bin")));
+  REQUIRE(write_incompressible(ntfscompact_test::temp_sub(tmp_dir, L"random.bin")));
 
   auto xe_executor{make_real_executor()};
   REQUIRE(xe_executor.has_value());
   ExecuteFn fn_execute{std::move(xe_executor.value())};
   CurrentState cs_plain{};
   const ExecuteResult er_result{fn_execute(
-      tmp_dir.Sub(L"random.bin"), Plan::Action::Compress, cs_plain,
-      Algorithm::Xpress8k)};
+      ntfscompact_test::temp_sub(tmp_dir, L"random.bin"), Plan::Action::kCompress, cs_plain,
+      Algorithm::kXpress8k)};
   if (er_result.e_outcome == ExecuteResult::Outcome::kSkipped) {
     CHECK(has(narrow(er_result.str_message), "无收益"));
-    CHECK_FALSE(is_wof_form(tmp_dir.Sub(L"random.bin")));
+    CHECK_FALSE(is_wof_form(ntfscompact_test::temp_sub(tmp_dir, L"random.bin")));
   } else if (er_result.e_outcome == ExecuteResult::Outcome::kSuccess) {
     MESSAGE("内核对该数据仍判定有收益，按压缩成功且复核通过计");
   } else {
@@ -291,40 +292,40 @@ TEST_CASE("无收益文件计跳过不计错误") {
 }
 
 TEST_CASE("只读属性文件压缩成功且属性恢复") {
-  ntfscompact_test::TempDir tmp_dir;
-  REQUIRE(tmp_dir.ok());
-  REQUIRE(make_plain(tmp_dir.Sub(L"readonly.bin")));
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  REQUIRE(make_plain(ntfscompact_test::temp_sub(tmp_dir, L"readonly.bin")));
   REQUIRE(SetFileAttributesW(
-              ntfscompact_test::TempDir::LongApiPath(tmp_dir.Sub(L"readonly.bin"))
+              ntfscompact_test::temp_long_api_path(ntfscompact_test::temp_sub(tmp_dir, L"readonly.bin"))
                   .c_str(),
               FILE_ATTRIBUTE_READONLY));
-  REQUIRE((get_attrs(tmp_dir.Sub(L"readonly.bin")) & FILE_ATTRIBUTE_READONLY) != 0);
+  REQUIRE((get_attrs(ntfscompact_test::temp_sub(tmp_dir, L"readonly.bin")) & FILE_ATTRIBUTE_READONLY) != 0);
 
   auto xe_executor{make_real_executor()};
   REQUIRE(xe_executor.has_value());
   ExecuteFn fn_execute{std::move(xe_executor.value())};
   CurrentState cs_plain{};
   const ExecuteResult er_result{fn_execute(
-      tmp_dir.Sub(L"readonly.bin"), Plan::Action::Compress, cs_plain,
-      Algorithm::Xpress8k)};
+      ntfscompact_test::temp_sub(tmp_dir, L"readonly.bin"), Plan::Action::kCompress, cs_plain,
+      Algorithm::kXpress8k)};
   CHECK(er_result.e_outcome == ExecuteResult::Outcome::kSuccess);
-  CHECK((get_attrs(tmp_dir.Sub(L"readonly.bin")) & FILE_ATTRIBUTE_READONLY) != 0);
+  CHECK((get_attrs(ntfscompact_test::temp_sub(tmp_dir, L"readonly.bin")) & FILE_ATTRIBUTE_READONLY) != 0);
 
-  std::wstring str_detector_error{};
-  RealDetector detector_check{&str_detector_error};
-  REQUIRE(narrow(str_detector_error).empty());
+  auto xe_detector{make_real_detector()};
+  REQUIRE(xe_detector.has_value());
+  const DetectFn fn_detect{std::move(xe_detector).value()};
   const DetectionResult dr_verified{
-      detector_check.Detect(tmp_dir.Sub(L"readonly.bin"))};
-  CHECK(dr_verified.state.kind == CurrentState::Kind::Wof);
-  CHECK(dr_verified.state.algorithm == Algorithm::Xpress8k);
+      fn_detect(ntfscompact_test::temp_sub(tmp_dir, L"readonly.bin"))};
+  CHECK(dr_verified.cs_state.e_kind == CurrentState::Kind::kWof);
+  CHECK(dr_verified.cs_state.e_algorithm == Algorithm::kXpress8k);
 }
 
 TEST_CASE("被独占打开的文件计错误") {
-  ntfscompact_test::TempDir tmp_dir;
-  REQUIRE(tmp_dir.ok());
-  REQUIRE(make_plain(tmp_dir.Sub(L"locked.bin")));
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  REQUIRE(make_plain(ntfscompact_test::temp_sub(tmp_dir, L"locked.bin")));
   HANDLE h_lock{CreateFileW(
-      ntfscompact_test::TempDir::LongApiPath(tmp_dir.Sub(L"locked.bin")).c_str(),
+      ntfscompact_test::temp_long_api_path(ntfscompact_test::temp_sub(tmp_dir, L"locked.bin")).c_str(),
       GENERIC_READ, 0, nullptr, OPEN_EXISTING, 0, nullptr)};
   REQUIRE(h_lock != INVALID_HANDLE_VALUE);
 
@@ -333,8 +334,8 @@ TEST_CASE("被独占打开的文件计错误") {
   ExecuteFn fn_execute{std::move(xe_executor.value())};
   CurrentState cs_plain{};
   const ExecuteResult er_result{fn_execute(
-      tmp_dir.Sub(L"locked.bin"), Plan::Action::Compress, cs_plain,
-      Algorithm::Xpress8k)};
+      ntfscompact_test::temp_sub(tmp_dir, L"locked.bin"), Plan::Action::kCompress, cs_plain,
+      Algorithm::kXpress8k)};
   CloseHandle(h_lock);
   CHECK(er_result.e_outcome == ExecuteResult::Outcome::kError);
   CHECK_FALSE(narrow(er_result.str_message).empty());
@@ -345,10 +346,10 @@ TEST_CASE("Uncompress 动作为未实现桩计错误") {
   REQUIRE(xe_executor.has_value());
   ExecuteFn fn_execute{std::move(xe_executor.value())};
   CurrentState cs_wof{};
-  cs_wof.kind = CurrentState::Kind::Wof;
+  cs_wof.e_kind = CurrentState::Kind::kWof;
   const ExecuteResult er_result{fn_execute(L"\\\\?\\D:\\no-such-t3.bin",
-                                            Plan::Action::Uncompress, cs_wof,
-                                            Algorithm::Xpress8k)};
+                                            Plan::Action::kUncompress, cs_wof,
+                                            Algorithm::kXpress8k)};
   CHECK(er_result.e_outcome == ExecuteResult::Outcome::kError);
   CHECK(has(narrow(er_result.str_message), "未实现"));
 }

@@ -2,8 +2,8 @@
 
 import std;
 
-#include "cli.h"
-#include "detect.h"
+#include "cli.hpp"
+#include "detect.hpp"
 
 namespace ntfscompact {
 
@@ -36,7 +36,7 @@ inline std::wstring check_compression_meets_target(bool b_is_external,
   }
   if (e_actual != e_target) {
     return std::format(L"复核失败：实际算法 {} ≠ 指定算法 {}",
-                       AlgorithmName(e_actual), AlgorithmName(e_target));
+                       algorithm_name(e_actual), algorithm_name(e_target));
   }
   return L"";
 }

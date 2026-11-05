@@ -84,13 +84,13 @@ bool is_transient_win32_error(ULONG u4_error) {
 
 ULONG to_wof_algorithm(Algorithm e_algorithm) {
   switch (e_algorithm) {
-    case Algorithm::Xpress4k:
+    case Algorithm::kXpress4k:
       return kWofAlgoXpress4k;
-    case Algorithm::Lzx:
+    case Algorithm::kLzx:
       return kWofAlgoLzx;
-    case Algorithm::Xpress8k:
+    case Algorithm::kXpress8k:
       return kWofAlgoXpress8k;
-    case Algorithm::Xpress16k:
+    case Algorithm::kXpress16k:
       return kWofAlgoXpress16k;
   }
   return kWofAlgoXpress8k;
@@ -99,15 +99,15 @@ ULONG to_wof_algorithm(Algorithm e_algorithm) {
 Algorithm from_wof_algorithm(ULONG u4_algorithm) {
   switch (u4_algorithm) {
     case kWofAlgoXpress4k:
-      return Algorithm::Xpress4k;
+      return Algorithm::kXpress4k;
     case kWofAlgoLzx:
-      return Algorithm::Lzx;
+      return Algorithm::kLzx;
     case kWofAlgoXpress8k:
-      return Algorithm::Xpress8k;
+      return Algorithm::kXpress8k;
     case kWofAlgoXpress16k:
-      return Algorithm::Xpress16k;
+      return Algorithm::kXpress16k;
   }
-  return Algorithm::Xpress8k;
+  return Algorithm::kXpress8k;
 }
 
 ExecuteResult make_error(std::wstring str_message) {
@@ -173,8 +173,8 @@ ExecuteResult compress_core(const ExecutorContext& ctx_execute,
     return make_error(
         std::format(L"无法打开文件（错误码 {}）", GetLastError()));
   }
-  if (e_action == Plan::Action::Recompress) {
-    if (cs_current.kind == CurrentState::Kind::Lznt1) {
+  if (e_action == Plan::Action::kRecompress) {
+    if (cs_current.e_kind == CurrentState::Kind::kLznt1) {
       USHORT u2_format_none{0};
       const IoctlOutcome io_unback{ioctl_with_retry(
           guard_file.get(), FSCTL_SET_COMPRESSION, &u2_format_none,
@@ -184,7 +184,7 @@ ExecuteResult compress_core(const ExecutorContext& ctx_execute,
             L"解除 LZNT1 压缩失败（FSCTL_SET_COMPRESSION 错误码 {}）",
             io_unback.u4_error));
       }
-    } else if (cs_current.kind == CurrentState::Kind::Wof) {
+    } else if (cs_current.e_kind == CurrentState::Kind::kWof) {
       const IoctlOutcome io_unback{ioctl_with_retry(
           guard_file.get(), FSCTL_DELETE_EXTERNAL_BACKING, nullptr, 0)};
       if (!io_unback.b_ok &&
@@ -239,7 +239,7 @@ ExecuteResult execute_one(const ExecutorContext& ctx_execute,
                           const std::wstring& str_long_path,
                           Plan::Action e_action,
                           const CurrentState& cs_current, Algorithm e_target) {
-  if (e_action == Plan::Action::Uncompress || e_action == Plan::Action::Skip) {
+  if (e_action == Plan::Action::kUncompress || e_action == Plan::Action::kSkip) {
     return make_error(L"解压执行段属工单 T4，未实现");
   }
   const DWORD u4_attrs{GetFileAttributesW(str_long_path.c_str())};

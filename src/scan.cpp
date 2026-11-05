@@ -1,249 +1,253 @@
-// 路径收集与递归遍历实现（工单 #3）
-#include "scan.h"
+#include "scan.hpp"
 
 namespace ntfscompact {
 namespace {
 
-constexpr uint64_t kMinCompressibleSize = 4096;  // ≤4KB 跳过
+constexpr std::uint64_t kMinCompressibleSize{4096};
 
 #ifndef IO_REPARSE_TAG_WOF
 #define IO_REPARSE_TAG_WOF (0x80000017u)
 #endif
 
-// 系统关键文件黑名单（文件名级，大小写不敏感）
-bool IsCriticalSystemFile(const std::wstring& display_path) {
-    const size_t sep = display_path.find_last_of(L"\\/");
-    const std::wstring name =
-        sep == std::wstring::npos ? display_path : display_path.substr(sep + 1);
-    return lstrcmpiW(name.c_str(), L"pagefile.sys") == 0 ||
-           lstrcmpiW(name.c_str(), L"hiberfil.sys") == 0 ||
-           lstrcmpiW(name.c_str(), L"swapfile.sys") == 0;
+bool is_critical_system_file(const std::wstring& str_display_path) {
+  const std::size_t u8_sep{str_display_path.find_last_of(L"\\/")};
+  const std::wstring str_name{u8_sep == std::wstring::npos
+                                  ? str_display_path
+                                  : str_display_path.substr(u8_sep + 1)};
+  return lstrcmpiW(str_name.c_str(), L"pagefile.sys") == 0 ||
+         lstrcmpiW(str_name.c_str(), L"hiberfil.sys") == 0 ||
+         lstrcmpiW(str_name.c_str(), L"swapfile.sys") == 0;
 }
 
-// 路径任一组件为 WinSxS（大小写不敏感，按组件精确匹配，前缀相似不误伤）
-bool HasWinSxSComponent(const std::wstring& display_path) {
-    size_t begin = 0;
-    while (begin <= display_path.size()) {
-        const size_t end = display_path.find_first_of(L"\\/", begin);
-        const std::wstring comp =
-            display_path.substr(begin, end == std::wstring::npos
-                                           ? std::wstring::npos
-                                           : end - begin);
-        if (!comp.empty() && lstrcmpiW(comp.c_str(), L"WinSxS") == 0) {
-            return true;
-        }
-        if (end == std::wstring::npos) break;
-        begin = end + 1;
+bool has_winsxs_component(const std::wstring& str_display_path) {
+  std::size_t u8_begin{0};
+  while (u8_begin <= str_display_path.size()) {
+    const std::size_t u8_end{str_display_path.find_first_of(L"\\/", u8_begin)};
+    const std::wstring str_comp{
+        str_display_path.substr(u8_begin, u8_end == std::wstring::npos
+                                             ? std::wstring::npos
+                                             : u8_end - u8_begin)};
+    if (!str_comp.empty() && lstrcmpiW(str_comp.c_str(), L"WinSxS") == 0) {
+      return true;
     }
-    return false;
+    if (u8_end == std::wstring::npos) break;
+    u8_begin = u8_end + 1;
+  }
+  return false;
 }
 
-// 规范化为绝对 \\?\ 长路径（>260 字符亦可）。已带前缀的原样返回（UNC 补 UNC 形式）。
-std::wstring ToLongPath(const std::wstring& raw) {
-    if (raw.rfind(L"\\\\?\\", 0) == 0) return raw;
-    wchar_t buffer[32768];
-    const DWORD n = GetFullPathNameW(raw.c_str(), 32768, buffer, nullptr);
-    if (n == 0 || n >= 32768) return raw;  // 规范化失败：按原样交给文件系统报错
-    std::wstring full(buffer, n);
-    if (full.rfind(L"\\\\", 0) == 0) {
-        return L"\\\\?\\UNC" + full.substr(1);  // \\server\share → \\?\UNC\server\share
+std::wstring to_long_path(const std::wstring& str_raw) {
+  if (str_raw.rfind(L"\\\\?\\", 0) == 0) return str_raw;
+  wchar_t arr_buffer[32768]{};
+  const DWORD u4_len{GetFullPathNameW(str_raw.c_str(), 32768, arr_buffer,
+                                      nullptr)};
+  if (u4_len == 0 || u4_len >= 32768) return str_raw;
+  const std::wstring str_full{arr_buffer, u4_len};
+  if (str_full.rfind(L"\\\\", 0) == 0) {
+    return L"\\\\?\\UNC" + str_full.substr(1);
+  }
+  return L"\\\\?\\" + str_full;
+}
+
+std::wstring to_display_path(const std::wstring& str_long_path) {
+  if (str_long_path.rfind(L"\\\\?\\UNC\\", 0) == 0) {
+    return L"\\" + str_long_path.substr(7);
+  }
+  if (str_long_path.rfind(L"\\\\?\\", 0) == 0) {
+    return str_long_path.substr(4);
+  }
+  return str_long_path;
+}
+
+bool has_wildcard(const std::wstring& str_path) {
+  return str_path.find_first_of(L"*?") != std::wstring::npos;
+}
+
+std::uint64_t find_data_size(const WIN32_FIND_DATAW& fd_find) {
+  ULARGE_INTEGER n_size{};
+  n_size.LowPart = fd_find.nFileSizeLow;
+  n_size.HighPart = fd_find.nFileSizeHigh;
+  return n_size.QuadPart;
+}
+
+bool is_directory(const WIN32_FIND_DATAW& fd_find) {
+  return (fd_find.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
+bool is_reparse(const WIN32_FIND_DATAW& fd_find) {
+  return (fd_find.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+}
+
+void walk_directory(const std::wstring& str_long_dir,
+                    const std::wstring& str_display_dir, ScanOutcome& so_out) {
+  const std::wstring str_pattern{str_long_dir + L"\\*"};
+  WIN32_FIND_DATAW fd_find{};
+  HANDLE h_find{FindFirstFileW(str_pattern.c_str(), &fd_find)};
+  if (h_find == INVALID_HANDLE_VALUE) {
+    so_out.vec_errors.push_back(
+        {str_display_dir, L"无法访问（不存在或权限不足）"});
+    return;
+  }
+  do {
+    if (wcscmp(fd_find.cFileName, L".") == 0 ||
+        wcscmp(fd_find.cFileName, L"..") == 0) {
+      continue;
     }
-    return L"\\\\?\\" + full;
-}
-
-// \\?\ 长路径 → 显示路径
-std::wstring ToDisplayPath(const std::wstring& long_path) {
-    if (long_path.rfind(L"\\\\?\\UNC\\", 0) == 0) {
-        return L"\\" + long_path.substr(7);
-    }
-    if (long_path.rfind(L"\\\\?\\", 0) == 0) {
-        return long_path.substr(4);
-    }
-    return long_path;
-}
-
-bool HasWildcard(const std::wstring& path) {
-    return path.find_first_of(L"*?") != std::wstring::npos;
-}
-
-uint64_t FindDataSize(const WIN32_FIND_DATAW& fd) {
-    ULARGE_INTEGER n{};
-    n.LowPart = fd.nFileSizeLow;
-    n.HighPart = fd.nFileSizeHigh;
-    return n.QuadPart;
-}
-
-bool IsDirectory(const WIN32_FIND_DATAW& fd) {
-    return (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-}
-
-bool IsReparse(const WIN32_FIND_DATAW& fd) {
-    return (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
-}
-
-// 遍历目录（不含 reparse 防环原则见头注释）
-void WalkDirectory(const std::wstring& long_dir, const std::wstring& display_dir,
-                   ScanOutcome& out) {
-    const std::wstring pattern = long_dir + L"\\*";
-    WIN32_FIND_DATAW fd{};
-    HANDLE find = FindFirstFileW(pattern.c_str(), &fd);
-    if (find == INVALID_HANDLE_VALUE) {
-        out.errors.push_back({display_dir, L"无法访问（不存在或权限不足）"});
-        return;
-    }
-    do {
-        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) {
-            continue;
-        }
-        const std::wstring child_long = long_dir + L"\\" + fd.cFileName;
-        const std::wstring child_disp = display_dir + L"\\" + fd.cFileName;
-        if (IsDirectory(fd)) {
-            if (IsReparse(fd)) {
-                // 不进符号链接/junction：防环核心
-                out.skipped.push_back(
-                    {child_disp, L"目录为符号链接/junction，不进入"});
-            } else if (HasWinSxSComponent(child_disp)) {
-                // 黑名单子树整树剪枝：避免遍历 WinSxS 海量文件
-                out.skipped.push_back({child_disp, L"位于 WinSxS 目录"});
-            } else {
-                WalkDirectory(child_long, child_disp, out);
-            }
-        } else {
-            FileMetadata meta;
-            meta.display_path = child_disp;
-            meta.attributes = fd.dwFileAttributes;
-            meta.reparse_tag = fd.dwReserved0;
-            meta.size = FindDataSize(fd);
-            std::wstring reason;
-            if (CheckFileCandidate(meta, &reason)) {
-                out.items.push_back({child_long, child_disp, meta.size});
-            } else {
-                out.skipped.push_back({child_disp, reason});
-            }
-        }
-    } while (FindNextFileW(find, &fd));
-    FindClose(find);
-}
-
-// 显式路径参数（无通配符）：文件 → 过滤收录；目录 → 递归；reparse 目录 → 跳过
-void HandleExplicitPath(const std::wstring& raw, ScanOutcome& out) {
-    const std::wstring long_path = ToLongPath(raw);
-    const std::wstring display = ToDisplayPath(long_path);
-    WIN32_FIND_DATAW fd{};
-    HANDLE find = FindFirstFileW(long_path.c_str(), &fd);
-    if (find == INVALID_HANDLE_VALUE) {
-        out.errors.push_back({display, L"无法访问（不存在或权限不足）"});
-        return;
-    }
-    FindClose(find);
-    if (IsDirectory(fd)) {
-        if (IsReparse(fd)) {
-            out.skipped.push_back({display, L"目录为符号链接/junction，不进入"});
-        } else {
-            WalkDirectory(long_path, display, out);
-        }
-        return;
-    }
-    FileMetadata meta;
-    meta.display_path = display;
-    meta.attributes = fd.dwFileAttributes;
-    meta.reparse_tag = fd.dwReserved0;
-    meta.size = FindDataSize(fd);
-    std::wstring reason;
-    if (CheckFileCandidate(meta, &reason)) {
-        out.items.push_back({long_path, display, meta.size});
+    const std::wstring str_child_long{str_long_dir + L"\\" + fd_find.cFileName};
+    const std::wstring str_child_disp{str_display_dir + L"\\" +
+                                      fd_find.cFileName};
+    if (is_directory(fd_find)) {
+      if (is_reparse(fd_find)) {
+        so_out.vec_skipped.push_back(
+            {str_child_disp, L"目录为符号链接/junction，不进入"});
+      } else if (has_winsxs_component(str_child_disp)) {
+        so_out.vec_skipped.push_back({str_child_disp, L"位于 WinSxS 目录"});
+      } else {
+        walk_directory(str_child_long, str_child_disp, so_out);
+      }
     } else {
-        out.skipped.push_back({display, reason});
+      FileMetadata fm_meta{};
+      fm_meta.str_display_path = str_child_disp;
+      fm_meta.u4_attributes = fd_find.dwFileAttributes;
+      fm_meta.u4_reparse_tag = fd_find.dwReserved0;
+      fm_meta.u8_size = find_data_size(fd_find);
+      std::wstring str_reason{};
+      if (check_file_candidate(fm_meta, &str_reason)) {
+        so_out.vec_items.push_back(
+            {str_child_long, str_child_disp, fm_meta.u8_size});
+      } else {
+        so_out.vec_skipped.push_back({str_child_disp, str_reason});
+      }
     }
+  } while (FindNextFileW(h_find, &fd_find));
+  FindClose(h_find);
 }
 
-// 通配符参数：仅匹配该层文件（目录不递归，对齐 compact.exe 语义）
-void HandleWildcard(const std::wstring& raw, ScanOutcome& out) {
-    const size_t sep = raw.find_last_of(L"\\/");
-    const std::wstring file_pattern =
-        sep == std::wstring::npos ? raw : raw.substr(sep + 1);
-    const std::wstring dir_part = [&]() -> std::wstring {
-        if (sep == std::wstring::npos) return L".";
-        if (sep == 0) return L"\\";
-        return raw.substr(0, sep);
-    }();
-    const std::wstring parent_long = ToLongPath(dir_part);
-    const std::wstring parent_disp = ToDisplayPath(parent_long);
-
-    WIN32_FIND_DATAW fd{};
-    HANDLE find = FindFirstFileW((parent_long + L"\\" + file_pattern).c_str(), &fd);
-    if (find == INVALID_HANDLE_VALUE) {
-        out.errors.push_back({parent_disp + L"\\" + file_pattern,
-                              L"无法访问（不存在或权限不足）"});
-        return;
+void handle_explicit_path(const std::wstring& str_raw, ScanOutcome& so_out) {
+  const std::wstring str_long_path{to_long_path(str_raw)};
+  const std::wstring str_display{to_display_path(str_long_path)};
+  WIN32_FIND_DATAW fd_find{};
+  HANDLE h_find{FindFirstFileW(str_long_path.c_str(), &fd_find)};
+  if (h_find == INVALID_HANDLE_VALUE) {
+    so_out.vec_errors.push_back(
+        {str_display, L"无法访问（不存在或权限不足）"});
+    return;
+  }
+  FindClose(h_find);
+  if (is_directory(fd_find)) {
+    if (is_reparse(fd_find)) {
+      so_out.vec_skipped.push_back(
+          {str_display, L"目录为符号链接/junction，不进入"});
+    } else {
+      walk_directory(str_long_path, str_display, so_out);
     }
-    do {
-        if (IsDirectory(fd)) continue;  // 通配符仅匹配文件
-        const std::wstring child_disp = parent_disp + L"\\" + fd.cFileName;
-        FileMetadata meta;
-        meta.display_path = child_disp;
-        meta.attributes = fd.dwFileAttributes;
-        meta.reparse_tag = fd.dwReserved0;
-        meta.size = FindDataSize(fd);
-        std::wstring reason;
-        if (CheckFileCandidate(meta, &reason)) {
-            out.items.push_back({parent_long + L"\\" + fd.cFileName, child_disp,
-                                 meta.size});
-        } else {
-            out.skipped.push_back({child_disp, reason});
-        }
-    } while (FindNextFileW(find, &fd));
-    FindClose(find);
+    return;
+  }
+  FileMetadata fm_meta{};
+  fm_meta.str_display_path = str_display;
+  fm_meta.u4_attributes = fd_find.dwFileAttributes;
+  fm_meta.u4_reparse_tag = fd_find.dwReserved0;
+  fm_meta.u8_size = find_data_size(fd_find);
+  std::wstring str_reason{};
+  if (check_file_candidate(fm_meta, &str_reason)) {
+    so_out.vec_items.push_back({str_long_path, str_display, fm_meta.u8_size});
+  } else {
+    so_out.vec_skipped.push_back({str_display, str_reason});
+  }
 }
 
-}  // namespace
+void handle_wildcard(const std::wstring& str_raw, ScanOutcome& so_out) {
+  const std::size_t u8_sep{str_raw.find_last_of(L"\\/")};
+  const std::wstring str_file_pattern{
+      u8_sep == std::wstring::npos ? str_raw : str_raw.substr(u8_sep + 1)};
+  const std::wstring str_dir_part{[&]() -> std::wstring {
+    if (u8_sep == std::wstring::npos) return L".";
+    if (u8_sep == 0) return L"\\";
+    return str_raw.substr(0, u8_sep);
+  }()};
+  const std::wstring str_parent_long{to_long_path(str_dir_part)};
+  const std::wstring str_parent_disp{to_display_path(str_parent_long)};
 
-bool CheckFileCandidate(const FileMetadata& metadata, std::wstring* skip_reason) {
-    if (IsCriticalSystemFile(metadata.display_path)) {
-        const size_t sep = metadata.display_path.find_last_of(L"\\/");
-        *skip_reason = L"系统关键文件（" +
-                       (sep == std::wstring::npos
-                            ? metadata.display_path
-                            : metadata.display_path.substr(sep + 1)) +
-                       L"）";
-        return false;
+  WIN32_FIND_DATAW fd_find{};
+  HANDLE h_find{
+      FindFirstFileW((str_parent_long + L"\\" + str_file_pattern).c_str(),
+                     &fd_find)};
+  if (h_find == INVALID_HANDLE_VALUE) {
+    so_out.vec_errors.push_back(
+        {str_parent_disp + L"\\" + str_file_pattern,
+         L"无法访问（不存在或权限不足）"});
+    return;
+  }
+  do {
+    if (is_directory(fd_find)) continue;
+    const std::wstring str_child_disp{str_parent_disp + L"\\" +
+                                      fd_find.cFileName};
+    FileMetadata fm_meta{};
+    fm_meta.str_display_path = str_child_disp;
+    fm_meta.u4_attributes = fd_find.dwFileAttributes;
+    fm_meta.u4_reparse_tag = fd_find.dwReserved0;
+    fm_meta.u8_size = find_data_size(fd_find);
+    std::wstring str_reason{};
+    if (check_file_candidate(fm_meta, &str_reason)) {
+      so_out.vec_items.push_back(
+          {str_parent_long + L"\\" + fd_find.cFileName, str_child_disp,
+           fm_meta.u8_size});
+    } else {
+      so_out.vec_skipped.push_back({str_child_disp, str_reason});
     }
-    // 文件判定只看目录部分（最后一段是文件名，文件名本身叫 WinSxS 不误伤）
-    const size_t sep = metadata.display_path.find_last_of(L"\\/");
-    const std::wstring dir_part =
-        sep == std::wstring::npos ? std::wstring()
-                                  : metadata.display_path.substr(0, sep);
-    if (HasWinSxSComponent(dir_part)) {
-        *skip_reason = L"位于 WinSxS 目录";
-        return false;
-    }
-    if (metadata.attributes & FILE_ATTRIBUTE_ENCRYPTED) {
-        *skip_reason = L"EFS 加密文件";
-        return false;
-    }
-    if (metadata.attributes & FILE_ATTRIBUTE_REPARSE_POINT) {
-        // WOF 压缩文件本身带 reparse tag，放行交现状检测；其余（符号链接/
-        // junction/Cloud 占位等）不属常规存储，跳过
-        if (metadata.reparse_tag != IO_REPARSE_TAG_WOF) {
-            *skip_reason = L"非常规 reparse point（符号链接/junction/Cloud 等）";
-            return false;
-        }
-    }
-    if (metadata.size <= kMinCompressibleSize) {
-        *skip_reason = L"文件大小 ≤4KB";
-        return false;
-    }
-    return true;
+  } while (FindNextFileW(h_find, &fd_find));
+  FindClose(h_find);
 }
 
-void ScanPaths(const std::vector<std::wstring>& raw_paths, ScanOutcome& out) {
-    for (const std::wstring& raw : raw_paths) {
-        if (HasWildcard(raw)) {
-            HandleWildcard(raw, out);
-        } else {
-            HandleExplicitPath(raw, out);
-        }
-    }
 }
 
-}  // namespace ntfscompact
+bool check_file_candidate(const FileMetadata& fm_metadata,
+                          std::wstring* ptr_skip_reason) {
+  if (is_critical_system_file(fm_metadata.str_display_path)) {
+    const std::size_t u8_sep{fm_metadata.str_display_path.find_last_of(L"\\/")};
+    *ptr_skip_reason =
+        L"系统关键文件（" +
+        (u8_sep == std::wstring::npos
+             ? fm_metadata.str_display_path
+             : fm_metadata.str_display_path.substr(u8_sep + 1)) +
+        L"）";
+    return false;
+  }
+  const std::size_t u8_sep{fm_metadata.str_display_path.find_last_of(L"\\/")};
+  const std::wstring str_dir_part{
+      u8_sep == std::wstring::npos
+          ? std::wstring()
+          : fm_metadata.str_display_path.substr(0, u8_sep)};
+  if (has_winsxs_component(str_dir_part)) {
+    *ptr_skip_reason = L"位于 WinSxS 目录";
+    return false;
+  }
+  if (fm_metadata.u4_attributes & FILE_ATTRIBUTE_ENCRYPTED) {
+    *ptr_skip_reason = L"EFS 加密文件";
+    return false;
+  }
+  if (fm_metadata.u4_attributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+    if (fm_metadata.u4_reparse_tag != IO_REPARSE_TAG_WOF) {
+      *ptr_skip_reason = L"非常规 reparse point（符号链接/junction/Cloud 等）";
+      return false;
+    }
+  }
+  if (fm_metadata.u8_size <= kMinCompressibleSize) {
+    *ptr_skip_reason = L"文件大小 ≤4KB";
+    return false;
+  }
+  return true;
+}
+
+void scan_paths(const std::vector<std::wstring>& vec_raw_paths,
+                ScanOutcome& so_out) {
+  for (const std::wstring& str_raw : vec_raw_paths) {
+    if (has_wildcard(str_raw)) {
+      handle_wildcard(str_raw, so_out);
+    } else {
+      handle_explicit_path(str_raw, so_out);
+    }
+  }
+}
+
+}
