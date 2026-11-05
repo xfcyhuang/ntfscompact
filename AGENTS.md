@@ -2,6 +2,11 @@
 
 ## Agent skills
 
+## 代码门禁
+
+- 代码一律不写注释（// 与 /* */ 全禁）。命名自解释；解释性内容进 commit message、issue、文档。
+- 字符串与用户可见输出文本不算注释。
+
 ### Issue tracker
 
 Issue 存放于 GitHub Issues（xfcyhuang/ntfscompact），通过 `gh` CLI 操作。见 `docs/agents/issue-tracker.md`。
