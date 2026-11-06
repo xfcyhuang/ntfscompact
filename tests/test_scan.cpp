@@ -3,6 +3,7 @@
 
 #include "scan.hpp"
 #include "temp_dir.hpp"
+#include "util.hpp"
 
 #include <windows.h>
 
@@ -31,6 +32,7 @@ bool make_junction(const std::wstring& str_link, const std::wstring& str_target)
 }
 
 using ntfscompact::FileMetadata;
+using ntfscompact::FlaggedDir;
 using ntfscompact::ScanOutcome;
 using ntfscompact::check_file_candidate;
 using ntfscompact::scan_paths;
@@ -302,4 +304,64 @@ TEST_CASE("端到端：黑名单与 ≤4KB 在遍历中生效且带原因") {
   CHECK(b_saw_size);
   CHECK(b_saw_critical);
   CHECK(b_saw_winsxs);
+}
+
+bool is_marked_compressed(const std::wstring& str_path) {
+  return (GetFileAttributesW(ntfscompact_test::temp_long_api_path(str_path).c_str()) &
+          FILE_ATTRIBUTE_COMPRESSED) != 0;
+}
+
+TEST_CASE("目录压缩标记：收集带标记目录（含显式根，排除 reparse 与 WinSxS）") {
+  ntfscompact_test::TempDir tmp{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp->b_ok);
+  REQUIRE(ntfscompact_test::temp_make_dir(tmp, L"marked"));
+  REQUIRE(ntfscompact_test::temp_make_dir(tmp, L"marked\\inner"));
+  REQUIRE(ntfscompact_test::temp_make_dir(tmp, L"plain"));
+  REQUIRE(ntfscompact_test::temp_make_dir(tmp, L"WinSxS"));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp, L"plain\\g.bin", 8192));
+  REQUIRE(make_junction(ntfscompact_test::temp_sub(tmp, L"link"),
+                        ntfscompact_test::temp_path(tmp)));
+
+  const std::wstring str_marked{ntfscompact_test::temp_sub(tmp, L"marked")};
+  const std::wstring str_inner{ntfscompact_test::temp_sub(tmp, L"marked\\inner")};
+  const std::wstring str_winsxs{ntfscompact_test::temp_sub(tmp, L"WinSxS")};
+  REQUIRE(ntfscompact_test::run_compact(L"/c \"" + str_marked + L"\"") == 0);
+  REQUIRE(ntfscompact_test::run_compact(L"/c \"" + str_inner + L"\"") == 0);
+  REQUIRE(ntfscompact_test::run_compact(L"/c \"" + str_winsxs + L"\"") == 0);
+  REQUIRE(is_marked_compressed(str_marked));
+  REQUIRE(is_marked_compressed(str_inner));
+  REQUIRE(is_marked_compressed(str_winsxs));
+
+  SUBCASE("遍历：仅收集带标记的普通目录，reparse 与 WinSxS 不收") {
+    ScanOutcome so_scan{};
+    scan_paths({ntfscompact_test::temp_path(tmp)}, so_scan);
+    CHECK(so_scan.vec_errors.empty());
+    REQUIRE(so_scan.vec_flagged_dirs.size() == 2);
+    bool b_has_marked{false};
+    bool b_has_inner{false};
+    for (const FlaggedDir& fd_flag : so_scan.vec_flagged_dirs) {
+      CHECK(fd_flag.str_long_path.rfind(L"\\\\?\\", 0) == 0);
+      b_has_marked = b_has_marked || fd_flag.str_display_path == str_marked;
+      b_has_inner = b_has_inner || fd_flag.str_display_path == str_inner;
+    }
+    CHECK(b_has_marked);
+    CHECK(b_has_inner);
+  }
+  SUBCASE("显式根目录本身带标记也收集") {
+    ScanOutcome so_scan{};
+    scan_paths({str_marked}, so_scan);
+    CHECK(so_scan.vec_errors.empty());
+    REQUIRE(so_scan.vec_flagged_dirs.size() == 2);
+    bool b_has_root{false};
+    for (const FlaggedDir& fd_flag : so_scan.vec_flagged_dirs) {
+      b_has_root = b_has_root || fd_flag.str_display_path == str_marked;
+    }
+    CHECK(b_has_root);
+  }
+  SUBCASE("无标记目录零收集") {
+    ScanOutcome so_scan{};
+    scan_paths({ntfscompact_test::temp_sub(tmp, L"plain")}, so_scan);
+    CHECK(so_scan.vec_errors.empty());
+    CHECK(so_scan.vec_flagged_dirs.empty());
+  }
 }

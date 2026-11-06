@@ -88,6 +88,10 @@ bool is_reparse(const WIN32_FIND_DATAW& fd_find) {
   return (fd_find.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
 }
 
+bool is_marked_compressed(const WIN32_FIND_DATAW& fd_find) {
+  return (fd_find.dwFileAttributes & FILE_ATTRIBUTE_COMPRESSED) != 0;
+}
+
 void walk_directory(const std::wstring& str_long_dir,
                     const std::wstring& str_display_dir, ScanOutcome& so_out) {
   const std::wstring str_pattern{str_long_dir + L"\\*"};
@@ -113,6 +117,9 @@ void walk_directory(const std::wstring& str_long_dir,
       } else if (has_winsxs_component(str_child_disp)) {
         so_out.vec_skipped.push_back({str_child_disp, L"位于 WinSxS 目录"});
       } else {
+        if (is_marked_compressed(fd_find)) {
+          so_out.vec_flagged_dirs.push_back({str_child_long, str_child_disp});
+        }
         walk_directory(str_child_long, str_child_disp, so_out);
       }
     } else {
@@ -145,6 +152,9 @@ void handle_explicit_path(const std::wstring& str_raw, ScanOutcome& so_out) {
       so_out.vec_skipped.push_back(
           {str_display, L"目录为符号链接/junction，不进入"});
     } else {
+      if (!has_winsxs_component(str_display) && is_marked_compressed(fd_find)) {
+        so_out.vec_flagged_dirs.push_back({str_long_path, str_display});
+      }
       walk_directory(str_long_path, str_display, so_out);
     }
     return;
