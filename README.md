@@ -73,6 +73,15 @@ ntfscompact -u D:\data                     # 解除压缩恢复常规存储
 | ≤4KB | 跳过（文件大小 ≤4KB） | 跳过 |
 | WIM/Cloud backing、EFS 加密、非常规 reparse point、pagefile/hiberfil/swapfile、WinSxS 内文件 | 跳过（黑名单） | 跳过（WIM/Cloud 不解除） |
 
+对遍历进入的普通目录与显式根目录：
+
+| 目录状态 | 压缩模式动作 | 解压模式动作 |
+|----------|--------------|--------------|
+| 带 NTFS 压缩标记（FILE_ATTRIBUTE_COMPRESSED） | 实跑清除标记（先于逐文件处理，此后新建文件不再自动 LZNT1）；干跑只列出「将清除标记」 | 同压缩模式 |
+| 无标记 / 符号链接、junction / WinSxS 子树 | 不处理、不输出 | 同压缩模式 |
+
+清除失败计错误（stderr、计入失败总数、退出码 1），不触发卷卸载。
+
 只读属性文件：压缩期间临时清除只读，完成后恢复。
 
 ## 汇总与退出码

@@ -188,6 +188,32 @@ bool file_is_wof(const DetectionResult& dr_state, Algorithm e_algorithm) {
          dr_state.cs_state.e_algorithm == e_algorithm;
 }
 
+bool dir_is_marked(const std::wstring& str_path) {
+  return (GetFileAttributesW(ntfscompact_test::temp_long_api_path(str_path).c_str()) &
+          FILE_ATTRIBUTE_COMPRESSED) != 0;
+}
+
+bool mark_dir(const std::wstring& str_path) {
+  return run_compact(L"/c \"" + str_path + L"\"") == 0 && dir_is_marked(str_path);
+}
+
+bool deny_dir_write_data(const std::wstring& str_dir) {
+  wchar_t arr_user[256]{};
+  DWORD u4_len{sizeof(arr_user) / sizeof(wchar_t)};
+  if (!GetUserNameW(arr_user, &u4_len)) {
+    return false;
+  }
+  const std::wstring str_cmd{L"icacls \"" + str_dir + L"\" /deny \"" +
+                             std::wstring(arr_user) +
+                             L":(WD,AD)\" >nul 2>&1"};
+  return _wsystem(str_cmd.c_str()) == 0;
+}
+
+void restore_dir_acl(const std::wstring& str_dir) {
+  const std::wstring str_cmd{L"icacls \"" + str_dir + L"\" /reset >nul 2>&1"};
+  _wsystem(str_cmd.c_str());
+}
+
 }
 
 TEST_CASE("e2e_flow：混合目录压缩→逐文件复核→干跑全跳过→解压→复核全普通") {
@@ -356,6 +382,93 @@ TEST_CASE("e2e_flow：退出码三态（用法 2 / 部分失败 1 / 全成 0）"
   CHECK(has_text(run_verify.str_out,
                  L"共 1 个文件：压缩 0、重压 0、解压 0、跳过 1"));
   CHECK_FALSE(has_text(run_verify.str_out, L"压缩/重压"));
+}
+
+TEST_CASE("e2e_flow：目录压缩标记——干跑列出、实跑清除、-q 汇总计数、解压同清、失败退出码 1") {
+  auto xe_detector{make_real_detector()};
+  REQUIRE(xe_detector.has_value());
+  const DetectFn fn_detect{std::move(xe_detector).value()};
+
+  ntfscompact_test::TempDir tmp_main{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_main->b_ok);
+  const std::wstring str_root{ntfscompact_test::temp_path(tmp_main)};
+  const std::wstring str_data{ntfscompact_test::temp_sub(tmp_main, L"data")};
+  REQUIRE(ntfscompact_test::temp_make_dir(tmp_main, L"data"));
+  const std::wstring str_file{ntfscompact_test::temp_sub(tmp_main, L"data\\keep.bin")};
+  REQUIRE(write_compressible(str_file) > 0);
+  REQUIRE(mark_dir(str_root));
+  REQUIRE(mark_dir(str_data));
+
+  ToolRun run_dry{};
+  REQUIRE(run_tool(L"-n \"" + str_root + L"\"", run_dry));
+  REQUIRE_MESSAGE(run_dry.i4_code == 0,
+                  narrow(run_dry.str_out + run_dry.str_err));
+  CHECK(has_text(run_dry.str_out, L"[目录标记] " + str_root + L"：将清除标记"));
+  CHECK(has_text(run_dry.str_out, L"[目录标记] " + str_data + L"：将清除标记"));
+  CHECK(has_text(run_dry.str_out, L"；将清除目录标记 2 个"));
+  CHECK(dir_is_marked(str_root));
+  CHECK(dir_is_marked(str_data));
+
+  ToolRun run_real{};
+  REQUIRE(run_tool(L"\"" + str_root + L"\"", run_real));
+  REQUIRE_MESSAGE(run_real.i4_code == 0,
+                  narrow(run_real.str_out + run_real.str_err));
+  CHECK(has_text(run_real.str_out, L"[目录标记] " + str_root + L"：已清除标记"));
+  CHECK(has_text(run_real.str_out, L"[目录标记] " + str_data + L"：已清除标记"));
+  CHECK(has_text(run_real.str_out, L"；已清除目录标记 2 个"));
+  CHECK_FALSE(dir_is_marked(str_root));
+  CHECK_FALSE(dir_is_marked(str_data));
+  CHECK(file_is_wof(fn_detect(str_file), Algorithm::kXpress8k));
+
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_main, L"data\\after.bin", 8192));
+  CHECK_FALSE(dir_is_marked(ntfscompact_test::temp_sub(tmp_main, L"data\\after.bin")));
+
+  ToolRun run_repeat{};
+  REQUIRE(run_tool(L"\"" + str_root + L"\"", run_repeat));
+  REQUIRE_MESSAGE(run_repeat.i4_code == 0,
+                  narrow(run_repeat.str_out + run_repeat.str_err));
+  CHECK_FALSE(has_text(run_repeat.str_out, L"目录标记"));
+
+  ToolRun run_uncompress{};
+  REQUIRE(mark_dir(str_data));
+  REQUIRE(run_tool(L"-u \"" + str_root + L"\"", run_uncompress));
+  REQUIRE_MESSAGE(run_uncompress.i4_code == 0,
+                  narrow(run_uncompress.str_out + run_uncompress.str_err));
+  CHECK(has_text(run_uncompress.str_out,
+                 L"[目录标记] " + str_data + L"：已清除标记"));
+  CHECK(has_text(run_uncompress.str_out, L"；已清除目录标记 1 个"));
+  CHECK_FALSE(dir_is_marked(str_data));
+
+  ToolRun run_quiet{};
+  REQUIRE(mark_dir(str_data));
+  REQUIRE(run_tool(L"-q \"" + str_root + L"\"", run_quiet));
+  REQUIRE_MESSAGE(run_quiet.i4_code == 0,
+                  narrow(run_quiet.str_out + run_quiet.str_err));
+  CHECK(run_quiet.str_out.find(L'\n') ==
+        run_quiet.str_out.rfind(L'\n'));
+  CHECK(has_text(run_quiet.str_out, L"；已清除目录标记 1 个"));
+  CHECK_FALSE(has_text(run_quiet.str_out, L"["));
+  CHECK_FALSE(dir_is_marked(str_data));
+
+  ntfscompact_test::TempDir tmp_fail{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_fail->b_ok);
+  const std::wstring str_fail_root{ntfscompact_test::temp_path(tmp_fail)};
+  const std::wstring str_locked{ntfscompact_test::temp_sub(tmp_fail, L"locked")};
+  REQUIRE(ntfscompact_test::temp_make_dir(tmp_fail, L"locked"));
+  REQUIRE(write_compressible(
+              ntfscompact_test::temp_sub(tmp_fail, L"plain.bin")) > 0);
+  REQUIRE(mark_dir(str_locked));
+  REQUIRE(deny_dir_write_data(str_locked));
+
+  ToolRun run_fail{};
+  REQUIRE(run_tool(L"\"" + str_fail_root + L"\"", run_fail));
+  restore_dir_acl(str_locked);
+  CHECK(run_fail.i4_code == 1);
+  CHECK(has_text(run_fail.str_err, L"[失败] " + str_locked));
+  CHECK(has_text(run_fail.str_err, L"无法打开目录（错误码 5）"));
+  CHECK(has_text(run_fail.str_out, L"plain.bin：已压缩为指定算法 xpress8k"));
+  CHECK(has_text(run_fail.str_out, L"；失败 1"));
+  CHECK(dir_is_marked(str_locked));
 }
 
 int wmain(int argc, wchar_t** argv) {
