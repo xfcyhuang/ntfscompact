@@ -24,8 +24,16 @@ struct FileReport {
   std::uint64_t u8_disk_size{0};
 };
 
+struct DirFlagReport {
+  std::wstring str_display_path{};
+  std::wstring str_long_path{};
+  bool b_cleared{false};
+  std::wstring str_error{};
+};
+
 struct PipelineResult {
   std::vector<FileReport> vec_reports{};
+  std::vector<DirFlagReport> vec_dir_flags{};
   int i4_failures{};
   std::uint64_t u8_compressed_original{0};
   std::uint64_t u8_compressed_disk{0};
@@ -126,6 +134,16 @@ inline std::wstring format_report_line(const FileReport& fr_report,
   return str_line;
 }
 
+inline std::wstring format_dir_flag_line(const DirFlagReport& df_report,
+                                         const Options& opt_options) {
+  if (!df_report.str_error.empty()) {
+    return L"[失败] " + df_report.str_display_path + L"：" + df_report.str_error;
+  }
+  return std::format(L"[目录标记] {}：{}",
+                     df_report.str_display_path,
+                     opt_options.b_dry_run ? L"将清除标记" : L"已清除标记");
+}
+
 inline bool counted_as_compressed(const FileReport& fr_report) {
   if (!fr_report.str_error.empty()) {
     return false;
@@ -183,6 +201,22 @@ inline std::wstring format_summary(const PipelineResult& pl_result,
   }
   if (pl_result.i4_failures > 0) {
     str_line += std::format(L"；失败 {}", pl_result.i4_failures);
+  }
+  if (opt_options.b_dry_run) {
+    if (!pl_result.vec_dir_flags.empty()) {
+      str_line += std::format(L"；将清除目录标记 {} 个",
+                              pl_result.vec_dir_flags.size());
+    }
+  } else {
+    int i4_dir_flags_cleared{0};
+    for (const DirFlagReport& df_report : pl_result.vec_dir_flags) {
+      if (df_report.b_cleared) {
+        ++i4_dir_flags_cleared;
+      }
+    }
+    if (i4_dir_flags_cleared > 0) {
+      str_line += std::format(L"；已清除目录标记 {} 个", i4_dir_flags_cleared);
+    }
   }
   return str_line;
 }
