@@ -1,6 +1,7 @@
 #include "executor.hpp"
 
 #include "attr_guard.hpp"
+#include "handle_guard.hpp"
 #include "wof_util.hpp"
 
 #include <windows.h>
@@ -21,12 +22,6 @@ namespace {
 constexpr ULONG kHresultFacilityWin32{0x80070000U};
 constexpr int kTransientRetryMax{10};
 constexpr DWORD kTransientRetryDelayMs{50};
-
-struct HandleReleaser {
-  void operator()(HANDLE h_file) const { CloseHandle(h_file); }
-};
-
-using HandleGuard = std::unique_ptr<std::remove_pointer_t<HANDLE>, HandleReleaser>;
 
 struct ExecutorContext {
   HmoduleGuard guard_module{};
@@ -86,7 +81,7 @@ ExecuteResult make_skipped(std::wstring str_message) {
   return er_result;
 }
 
-HandleGuard open_file_for_compress(const std::wstring& str_long_path) {
+HandlePtr open_file_for_compress(const std::wstring& str_long_path) {
   HANDLE h_open{INVALID_HANDLE_VALUE};
   retry_on_transient([&] {
     h_open = CreateFileW(
@@ -98,9 +93,9 @@ HandleGuard open_file_for_compress(const std::wstring& str_long_path) {
     return h_open != INVALID_HANDLE_VALUE ? 0 : GetLastError();
   });
   if (h_open == INVALID_HANDLE_VALUE) {
-    return HandleGuard{};
+    return HandlePtr{};
   }
-  return HandleGuard{h_open};
+  return HandlePtr{h_open};
 }
 
 IoctlOutcome ioctl_with_retry(HANDLE h_file, DWORD u4_control, void* ptr_in,
@@ -119,7 +114,7 @@ ExecuteResult compress_core(const ExecutorContext& ctx_execute,
                             const std::wstring& str_long_path,
                             Plan::Action e_action,
                             const CurrentState& cs_current, Algorithm e_target) {
-  HandleGuard guard_file{open_file_for_compress(str_long_path)};
+  HandlePtr guard_file{open_file_for_compress(str_long_path)};
   if (!guard_file) {
     return make_error(
         std::format(L"无法打开文件（错误码 {}）", GetLastError()),

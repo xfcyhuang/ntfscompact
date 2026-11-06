@@ -3,22 +3,13 @@ import std;
 #include "uncompress.hpp"
 
 #include "attr_guard.hpp"
+#include "handle_guard.hpp"
 
 #include <windows.h>
 #include <winioctl.h>
 
 namespace ntfscompact {
 namespace {
-
-struct HandleCloser {
-  auto operator()(HANDLE h_raw) const noexcept -> void {
-    if (h_raw != INVALID_HANDLE_VALUE) {
-      CloseHandle(h_raw);
-    }
-  }
-};
-
-using HandlePtr = std::unique_ptr<void, HandleCloser>;
 
 auto open_read_write(const std::wstring& str_long_path) -> HandlePtr {
   return HandlePtr{CreateFileW(str_long_path.c_str(), GENERIC_READ | GENERIC_WRITE,
@@ -30,14 +21,6 @@ auto run_delete_backing(HANDLE h_file) -> DWORD {
   DWORD u4_returned{};
   const BOOL b_ok{DeviceIoControl(h_file, FSCTL_DELETE_EXTERNAL_BACKING, nullptr, 0,
                                   nullptr, 0, &u4_returned, nullptr)};
-  return b_ok ? 0 : GetLastError();
-}
-
-auto run_clear_lznt1(HANDLE h_file) -> DWORD {
-  USHORT u2_format{COMPRESSION_FORMAT_NONE};
-  DWORD u4_returned{};
-  const BOOL b_ok{DeviceIoControl(h_file, FSCTL_SET_COMPRESSION, &u2_format,
-                                  sizeof(u2_format), nullptr, 0, &u4_returned, nullptr)};
   return b_ok ? 0 : GetLastError();
 }
 
@@ -77,7 +60,7 @@ auto uncompress_file(const std::wstring& str_long_path,
   }
   const DWORD u4_ioctl_err{st_before.cs_state.e_kind == CurrentState::Kind::kWof
                                ? run_delete_backing(ptr_file.get())
-                               : run_clear_lznt1(ptr_file.get())};
+                               : set_compression_none(ptr_file.get())};
   ptr_file.reset();
   AttrFailure af_restore{};
   if (!end_readonly_guard(ra_attr, str_long_path, &af_restore)) {
