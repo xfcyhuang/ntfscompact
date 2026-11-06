@@ -301,7 +301,7 @@ TEST_CASE("run_pipeline：-u 实跑逐文件解压，未压缩与遍历期跳过
 
   std::FILE* f_out{std::tmpfile()};
   REQUIRE(f_out != nullptr);
-  const int i_code{run_pipeline(opt, fn_detect, ExecuteFn{}, fn, ntfscompact::ReleaseFn{}, f_out, f_out)};
+  const int i_code{run_pipeline(opt, fn_detect, ExecuteFn{}, fn, ntfscompact::ReleaseFn{}, ntfscompact::DirFlagFn{}, f_out, f_out)};
   const std::wstring str_text{read_stream(f_out)};
   std::fclose(f_out);
 
@@ -334,7 +334,7 @@ TEST_CASE("run_pipeline：解压失败计入失败并继续跑完") {
   std::FILE* f_err{std::tmpfile()};
   REQUIRE(f_out != nullptr);
   REQUIRE(f_err != nullptr);
-  const int i_code{run_pipeline(opt, fn_detect, ExecuteFn{}, fn, ntfscompact::ReleaseFn{}, f_out, f_err)};
+  const int i_code{run_pipeline(opt, fn_detect, ExecuteFn{}, fn, ntfscompact::ReleaseFn{}, ntfscompact::DirFlagFn{}, f_out, f_err)};
   const std::wstring str_out{read_stream(f_out)};
   const std::wstring str_err{read_stream(f_err)};
   std::fclose(f_out);
@@ -365,7 +365,7 @@ TEST_CASE("run_pipeline：-u -n 干跑只报告不执行") {
 
   std::FILE* f_out{std::tmpfile()};
   REQUIRE(f_out != nullptr);
-  const int i_code{run_pipeline(opt, fn_detect, ExecuteFn{}, fn, ntfscompact::ReleaseFn{}, f_out, f_out)};
+  const int i_code{run_pipeline(opt, fn_detect, ExecuteFn{}, fn, ntfscompact::ReleaseFn{}, ntfscompact::DirFlagFn{}, f_out, f_out)};
   const std::wstring str_text{read_stream(f_out)};
   std::fclose(f_out);
 
@@ -394,7 +394,7 @@ TEST_CASE("run_pipeline：压缩模式不调解压执行器") {
 
   std::FILE* f_out{std::tmpfile()};
   REQUIRE(f_out != nullptr);
-  const int i_code{run_pipeline(opt, fn_detect, fn_execute, fn, ntfscompact::ReleaseFn{}, f_out, f_out)};
+  const int i_code{run_pipeline(opt, fn_detect, fn_execute, fn, ntfscompact::ReleaseFn{}, ntfscompact::DirFlagFn{}, f_out, f_out)};
   std::fclose(f_out);
 
   CHECK(i_code == 0);

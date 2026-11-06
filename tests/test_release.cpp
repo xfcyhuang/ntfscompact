@@ -178,7 +178,7 @@ TEST_CASE("run_pipeline：注入假释放后压缩继续") {
   std::FILE* f_err{std::tmpfile()};
   REQUIRE(f_out != nullptr);
   const int i4_code{ntfscompact::run_pipeline(
-      opt_case, fn_detect, fn_execute, fn_uncompress, fn_release, f_out,
+      opt_case, fn_detect, fn_execute, fn_uncompress, fn_release, ntfscompact::DirFlagFn{}, f_out,
       f_err)};
   std::fclose(f_out);
   std::fclose(f_err);

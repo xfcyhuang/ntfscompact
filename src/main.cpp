@@ -59,6 +59,18 @@ int wmain(int argc, wchar_t** argv) {
     }
     fn_release = std::move(xe_releaser).value();
   }
+  ntfscompact::DirFlagFn fn_dir_flag{};
+  if (!pr_parse.opt_options.b_dry_run) {
+    auto xe_dir_flag_clearer{ntfscompact::make_real_dir_flag_clearer()};
+    if (!xe_dir_flag_clearer.has_value()) {
+      ntfscompact::write_utf8(stderr, L"ntfscompact: " +
+                                          std::move(xe_dir_flag_clearer).error() +
+                                          L"\n");
+      return 1;
+    }
+    fn_dir_flag = std::move(xe_dir_flag_clearer).value();
+  }
   return ntfscompact::run_pipeline(pr_parse.opt_options, fn_detect, fn_execute,
-                                   fn_uncompress, fn_release, stdout, stderr);
+                                   fn_uncompress, fn_release, fn_dir_flag,
+                                   stdout, stderr);
 }

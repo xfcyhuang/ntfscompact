@@ -129,6 +129,12 @@ PipelineResult run_scan(const Options& opt_options, const DetectFn& fn_detect) {
     fr_report.pl_plan.str_reason = sk_skip.str_reason;
     pl_result.vec_reports.push_back(fr_report);
   }
+  for (const FlaggedDir& fd_flag : so_scan.vec_flagged_dirs) {
+    DirFlagReport df_report{};
+    df_report.str_display_path = fd_flag.str_display_path;
+    df_report.str_long_path = fd_flag.str_long_path;
+    pl_result.vec_dir_flags.push_back(df_report);
+  }
   for (const ScanItem& si_item : so_scan.vec_items) {
     FileReport fr_report{};
     fr_report.str_display_path = si_item.str_display_path;
@@ -159,10 +165,31 @@ PipelineResult run_scan(const Options& opt_options, const DetectFn& fn_detect) {
 int run_pipeline(const Options& opt_options, const DetectFn& fn_detect,
                  const ExecuteFn& fn_execute,
                  const UncompressFn& fn_uncompress, const ReleaseFn& fn_release,
-                 std::FILE* f_out, std::FILE* f_err) {
+                 const DirFlagFn& fn_dir_flag, std::FILE* f_out,
+                 std::FILE* f_err) {
   PipelineResult pl_result{run_scan(opt_options, fn_detect)};
 
   if (!opt_options.b_dry_run) {
+    for (DirFlagReport& df_report : pl_result.vec_dir_flags) {
+      if (!fn_dir_flag) {
+        df_report.str_error = L"标记清除器未接线";
+        ++pl_result.i4_failures;
+        write_utf8(f_err, format_dir_flag_line(df_report, opt_options) + L"\n");
+        continue;
+      }
+      const std::expected<void, std::wstring> xe_clear{
+          fn_dir_flag(df_report.str_long_path)};
+      if (!xe_clear.has_value()) {
+        df_report.str_error = xe_clear.error();
+        ++pl_result.i4_failures;
+        write_utf8(f_err, format_dir_flag_line(df_report, opt_options) + L"\n");
+        continue;
+      }
+      df_report.b_cleared = true;
+      if (!opt_options.b_quiet) {
+        write_utf8(f_out, format_dir_flag_line(df_report, opt_options) + L"\n");
+      }
+    }
     for (FileReport& fr_report : pl_result.vec_reports) {
       if (!fr_report.str_error.empty()) {
         emit_report(fr_report, opt_options, f_out, f_err);
@@ -252,6 +279,11 @@ int run_pipeline(const Options& opt_options, const DetectFn& fn_detect,
   collect_byte_stats(pl_result);
 
   if (opt_options.b_dry_run) {
+    for (const DirFlagReport& df_report : pl_result.vec_dir_flags) {
+      if (!opt_options.b_quiet) {
+        write_utf8(f_out, format_dir_flag_line(df_report, opt_options) + L"\n");
+      }
+    }
     for (const FileReport& fr_report : pl_result.vec_reports) {
       emit_report(fr_report, opt_options, f_out, f_err);
     }

@@ -4,6 +4,7 @@ import std;
 
 #include "cli.hpp"
 #include "detect.hpp"
+#include "dir_flag.hpp"
 #include "executor.hpp"
 #include "release.hpp"
 #include "uncompress.hpp"
@@ -230,6 +231,7 @@ void write_utf8(std::FILE* f_stream, const std::wstring& str_text);
 int run_pipeline(const Options& opt_options, const DetectFn& fn_detect,
                  const ExecuteFn& fn_execute,
                  const UncompressFn& fn_uncompress, const ReleaseFn& fn_release,
-                 std::FILE* f_out, std::FILE* f_err);
+                 const DirFlagFn& fn_dir_flag, std::FILE* f_out,
+                 std::FILE* f_err);
 
 }
