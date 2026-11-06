@@ -981,26 +981,14 @@ TEST_CASE("run_pipeline：-u 占用经强制卸载后解压") {
   REQUIRE(rec_release.vec_calls.size() == 1);
 }
 
-bool dir_flag_is_set(const std::wstring& str_path) {
-  return (GetFileAttributesW(ntfscompact_test::temp_long_api_path(str_path).c_str()) &
-          FILE_ATTRIBUTE_COMPRESSED) != 0;
-}
-
-bool mark_dir_flagged(const std::wstring& str_path) {
-  if (ntfscompact_test::run_compact(L"/c \"" + str_path + L"\"") != 0) {
-    return false;
-  }
-  return dir_flag_is_set(str_path);
-}
-
 TEST_CASE("run_pipeline：实跑清除目录标记先于逐文件处理") {
   ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
   REQUIRE(tmp_dir->b_ok);
   REQUIRE(ntfscompact_test::temp_make_dir(tmp_dir, L"one"));
   REQUIRE(ntfscompact_test::temp_make_dir(tmp_dir, L"two"));
   REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"one\\plain.bin", 8192));
-  REQUIRE(mark_dir_flagged(ntfscompact_test::temp_sub(tmp_dir, L"one")));
-  REQUIRE(mark_dir_flagged(ntfscompact_test::temp_sub(tmp_dir, L"two")));
+  REQUIRE(ntfscompact_test::mark_dir(ntfscompact_test::temp_sub(tmp_dir, L"one")));
+  REQUIRE(ntfscompact_test::mark_dir(ntfscompact_test::temp_sub(tmp_dir, L"two")));
 
   Options opt_case{compress_options()};
   opt_case.vec_paths.push_back(ntfscompact_test::temp_path(tmp_dir));
@@ -1050,8 +1038,8 @@ TEST_CASE("run_pipeline：目录标记清除失败计错误进 stderr 且退出�
   REQUIRE(ntfscompact_test::temp_make_dir(tmp_dir, L"bad"));
   REQUIRE(ntfscompact_test::temp_make_dir(tmp_dir, L"good"));
   REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"bad\\plain.bin", 8192));
-  REQUIRE(mark_dir_flagged(ntfscompact_test::temp_sub(tmp_dir, L"bad")));
-  REQUIRE(mark_dir_flagged(ntfscompact_test::temp_sub(tmp_dir, L"good")));
+  REQUIRE(ntfscompact_test::mark_dir(ntfscompact_test::temp_sub(tmp_dir, L"bad")));
+  REQUIRE(ntfscompact_test::mark_dir(ntfscompact_test::temp_sub(tmp_dir, L"good")));
 
   Options opt_case{compress_options()};
   opt_case.vec_paths.push_back(ntfscompact_test::temp_path(tmp_dir));
@@ -1095,7 +1083,7 @@ TEST_CASE("run_pipeline：干跑只列目录标记，不清除不执行") {
   REQUIRE(ntfscompact_test::temp_make_dir(tmp_dir, L"one"));
   REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"one\\plain.bin", 8192));
   const std::wstring str_marked{ntfscompact_test::temp_sub(tmp_dir, L"one")};
-  REQUIRE(mark_dir_flagged(str_marked));
+  REQUIRE(ntfscompact_test::mark_dir(str_marked));
 
   Options opt_case{compress_options()};
   opt_case.b_dry_run = true;
@@ -1125,7 +1113,7 @@ TEST_CASE("run_pipeline：干跑只列目录标记，不清除不执行") {
   CHECK(recorder.vec_calls.empty());
   CHECK(contains(str_text, str_marked + L"：将清除标记"));
   CHECK(contains(str_text, L"；将清除目录标记 1 个"));
-  CHECK(dir_flag_is_set(str_marked));
+  CHECK(ntfscompact_test::dir_is_marked(str_marked));
 }
 
 TEST_CASE("run_pipeline：-q 目录行受抑，汇总计数仍在") {
@@ -1134,8 +1122,8 @@ TEST_CASE("run_pipeline：-q 目录行受抑，汇总计数仍在") {
   REQUIRE(ntfscompact_test::temp_make_dir(tmp_dir, L"one"));
   REQUIRE(ntfscompact_test::temp_make_dir(tmp_dir, L"two"));
   REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"one\\plain.bin", 8192));
-  REQUIRE(mark_dir_flagged(ntfscompact_test::temp_sub(tmp_dir, L"one")));
-  REQUIRE(mark_dir_flagged(ntfscompact_test::temp_sub(tmp_dir, L"two")));
+  REQUIRE(ntfscompact_test::mark_dir(ntfscompact_test::temp_sub(tmp_dir, L"one")));
+  REQUIRE(ntfscompact_test::mark_dir(ntfscompact_test::temp_sub(tmp_dir, L"two")));
 
   Options opt_case{compress_options()};
   opt_case.b_quiet = true;
@@ -1170,7 +1158,7 @@ TEST_CASE("run_pipeline：解压模式同样清除目录标记") {
   REQUIRE(tmp_dir->b_ok);
   REQUIRE(ntfscompact_test::temp_make_dir(tmp_dir, L"one"));
   REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"one\\woflzx.bin", 8192));
-  REQUIRE(mark_dir_flagged(ntfscompact_test::temp_sub(tmp_dir, L"one")));
+  REQUIRE(ntfscompact_test::mark_dir(ntfscompact_test::temp_sub(tmp_dir, L"one")));
 
   Options opt_case{compress_options()};
   opt_case.b_uncompress = true;

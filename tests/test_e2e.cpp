@@ -17,6 +17,8 @@ using ntfscompact::CurrentState;
 using ntfscompact::DetectionResult;
 using ntfscompact::DetectFn;
 using ntfscompact::make_real_detector;
+using ntfscompact_test::dir_is_marked;
+using ntfscompact_test::mark_dir;
 using ntfscompact_test::narrow;
 using ntfscompact_test::run_compact;
 
@@ -186,15 +188,6 @@ bool file_is_wof(const DetectionResult& dr_state, Algorithm e_algorithm) {
          dr_state.cs_state.e_kind == CurrentState::Kind::kWof &&
          dr_state.cs_state.i4_provider == CurrentState::kProviderFile &&
          dr_state.cs_state.e_algorithm == e_algorithm;
-}
-
-bool dir_is_marked(const std::wstring& str_path) {
-  return (GetFileAttributesW(ntfscompact_test::temp_long_api_path(str_path).c_str()) &
-          FILE_ATTRIBUTE_COMPRESSED) != 0;
-}
-
-bool mark_dir(const std::wstring& str_path) {
-  return run_compact(L"/c \"" + str_path + L"\"") == 0 && dir_is_marked(str_path);
 }
 
 bool deny_dir_write_data(const std::wstring& str_dir) {
@@ -461,8 +454,9 @@ TEST_CASE("e2e_flow：目录压缩标记——干跑列出、实跑清除、-q �
   REQUIRE(deny_dir_write_data(str_locked));
 
   ToolRun run_fail{};
-  REQUIRE(run_tool(L"\"" + str_fail_root + L"\"", run_fail));
+  const bool b_tool_ran{run_tool(L"\"" + str_fail_root + L"\"", run_fail)};
   restore_dir_acl(str_locked);
+  REQUIRE(b_tool_ran);
   CHECK(run_fail.i4_code == 1);
   CHECK(has_text(run_fail.str_err, L"[失败] " + str_locked));
   CHECK(has_text(run_fail.str_err, L"无法打开目录（错误码 5）"));

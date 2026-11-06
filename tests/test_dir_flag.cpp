@@ -12,17 +12,9 @@ namespace {
 using ntfscompact::DirFlagFn;
 using ntfscompact::clear_dir_flag;
 using ntfscompact::make_real_dir_flag_clearer;
+using ntfscompact_test::dir_is_marked;
+using ntfscompact_test::mark_dir;
 using ntfscompact_test::narrow;
-
-bool dir_is_marked(const std::wstring& str_path) {
-  return (GetFileAttributesW(ntfscompact_test::temp_long_api_path(str_path).c_str()) &
-          FILE_ATTRIBUTE_COMPRESSED) != 0;
-}
-
-bool mark_dir(const std::wstring& str_path) {
-  return ntfscompact_test::run_compact(L"/c \"" + str_path + L"\"") == 0 &&
-         dir_is_marked(str_path);
-}
 
 }
 
