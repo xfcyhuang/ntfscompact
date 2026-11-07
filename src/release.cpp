@@ -59,6 +59,111 @@ bool process_is_elevated() {
   return b_ok != FALSE && te_elevation.TokenIsElevated != 0;
 }
 
+namespace {
+
+std::uint32_t escalation_delay_ms(const EscalationBackoff& eb_backoff,
+                                  std::size_t u8_escalation,
+                                  std::uint32_t u4_spent_ms) {
+  if (eb_backoff.vec_delays_ms.empty()) {
+    return 0;
+  }
+  const std::size_t u8_index{
+      u8_escalation < eb_backoff.vec_delays_ms.size()
+          ? u8_escalation
+          : eb_backoff.vec_delays_ms.size() - 1};
+  if (u4_spent_ms >= eb_backoff.u4_budget_ms) {
+    return 0;
+  }
+  const std::uint32_t u4_remaining{eb_backoff.u4_budget_ms - u4_spent_ms};
+  const std::uint32_t u4_delay{eb_backoff.vec_delays_ms[u8_index]};
+  return u4_delay > u4_remaining ? u4_remaining : u4_delay;
+}
+
+ReleaseOutcome run_release_chain(const std::vector<ReleaseFn>& vec_levels,
+                                 const std::wstring& str_long_path,
+                                 const EscalationBackoff& eb_backoff) {
+  const std::function<void(std::uint32_t)> fn_sleep_default{
+      [](std::uint32_t u4_ms) { Sleep(u4_ms); }};
+  const std::function<void(std::uint32_t)>& fn_sleep{
+      eb_backoff.fn_sleep ? eb_backoff.fn_sleep : fn_sleep_default};
+  ReleaseOutcome ro_merged{};
+  ReleaseOutcome::Level e_last_level{ReleaseOutcome::Level::kNone};
+  std::wstring str_last_detail{};
+  std::uint32_t u4_spent{0};
+  for (std::size_t u8_index{0}; u8_index < vec_levels.size(); ++u8_index) {
+    if (u8_index > 0) {
+      const std::uint32_t u4_delay{
+          escalation_delay_ms(eb_backoff, u8_index - 1, u4_spent)};
+      if (u4_delay > 0) {
+        fn_sleep(u4_delay);
+        u4_spent += u4_delay;
+      }
+      if (!probe_file_occupied(str_long_path)) {
+        ReleaseOutcome ro_landed{std::move(ro_merged)};
+        ro_landed.e_status = ReleaseOutcome::Status::kReleased;
+        ro_landed.e_level = e_last_level;
+        ro_landed.str_detail = L"经退避探测确认释放";
+        return ro_landed;
+      }
+    }
+    const ReleaseOutcome ro_step{vec_levels[u8_index](str_long_path)};
+    ro_merged.vec_closed.insert(ro_merged.vec_closed.end(),
+                                ro_step.vec_closed.begin(),
+                                ro_step.vec_closed.end());
+    if (ro_step.e_level != ReleaseOutcome::Level::kNone) {
+      e_last_level = ro_step.e_level;
+    }
+    if (!ro_step.str_detail.empty()) {
+      str_last_detail = ro_step.str_detail;
+    }
+    if (ro_step.e_status != ReleaseOutcome::Status::kBusy) {
+      ReleaseOutcome ro_done{std::move(ro_merged)};
+      ro_done.e_status = ReleaseOutcome::Status::kReleased;
+      ro_done.e_level = e_last_level;
+      ro_done.str_detail = ro_step.str_detail;
+      return ro_done;
+    }
+  }
+  ReleaseOutcome ro_busy{std::move(ro_merged)};
+  ro_busy.e_status = ReleaseOutcome::Status::kBusy;
+  ro_busy.e_level = e_last_level;
+  ro_busy.str_detail = std::wstring{L"占用不可释放：升级链尽后仍被占用"};
+  if (!str_last_detail.empty()) {
+    ro_busy.str_detail += L"（" + str_last_detail + L"）";
+  }
+  return ro_busy;
+}
+
+}
+
+std::wstring level_display_name(ReleaseOutcome::Level e_level) {
+  switch (e_level) {
+    case ReleaseOutcome::Level::kOplock:
+      return L"Oplock 协商";
+    case ReleaseOutcome::Level::kRmGraceful:
+      return L"RM 优雅关";
+    case ReleaseOutcome::Level::kRmForce:
+      return L"RM 强制关";
+    case ReleaseOutcome::Level::kHandle:
+      return L"句柄强关";
+    case ReleaseOutcome::Level::kNone:
+      return L"探测释放";
+  }
+  return L"探测释放";
+}
+
+std::expected<ReleaseFn, std::wstring> make_escalating_releaser(
+    std::vector<ReleaseFn> vec_levels, const EscalationBackoff& eb_backoff) {
+  return ReleaseFn{
+      [vec_levels = std::move(vec_levels), eb_backoff](
+          const std::wstring& str_long_path) -> ReleaseOutcome {
+        if (!probe_file_occupied(str_long_path)) {
+          return ReleaseOutcome{};
+        }
+        return run_release_chain(vec_levels, str_long_path, eb_backoff);
+      }};
+}
+
 std::expected<ReleaseFn, std::wstring> make_real_releaser(
     const DismountFn& fn_dismount) {
   if (!fn_dismount) {
