@@ -30,6 +30,10 @@ bool probe_file_occupied(const std::wstring& str_long_path);
 
 bool process_is_elevated();
 
+enum class ProcessRisk { kLow, kHigh, kUnknown };
+
+ProcessRisk classify_process_risk(const std::wstring& str_process_name);
+
 std::wstring level_display_name(ReleaseOutcome::Level e_level);
 
 std::wstring release_audit_entry(const ReleaseOutcome& ro_outcome);

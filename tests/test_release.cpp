@@ -170,6 +170,52 @@ bool write_compressible(const std::wstring& str_long_path) {
 
 }
 
+TEST_CASE("classify_process_risk：低风险占用者入表") {
+  using ntfscompact::ProcessRisk;
+  CHECK(ntfscompact::classify_process_risk(L"SearchIndexer.exe") ==
+        ProcessRisk::kLow);
+  CHECK(ntfscompact::classify_process_risk(L"searchprotocolhost.exe") ==
+        ProcessRisk::kLow);
+  CHECK(ntfscompact::classify_process_risk(L"SEARCHFILTERHOST.EXE") ==
+        ProcessRisk::kLow);
+  CHECK(ntfscompact::classify_process_risk(L"MsMpEng.exe") == ProcessRisk::kLow);
+  CHECK(ntfscompact::classify_process_risk(L"NisSrv.exe") == ProcessRisk::kLow);
+  CHECK(ntfscompact::classify_process_risk(L"ntfscompact_hold.exe") ==
+        ProcessRisk::kLow);
+}
+
+TEST_CASE("classify_process_risk：explorer 与数据库/虚拟机/编辑器/系统关键进程高风险") {
+  using ntfscompact::ProcessRisk;
+  CHECK(ntfscompact::classify_process_risk(L"explorer.exe") ==
+        ProcessRisk::kHigh);
+  CHECK(ntfscompact::classify_process_risk(L"sqlservr.exe") ==
+        ProcessRisk::kHigh);
+  CHECK(ntfscompact::classify_process_risk(L"mysqld.exe") == ProcessRisk::kHigh);
+  CHECK(ntfscompact::classify_process_risk(L"vmware-vmx.exe") ==
+        ProcessRisk::kHigh);
+  CHECK(ntfscompact::classify_process_risk(L"VirtualBox.exe") ==
+        ProcessRisk::kHigh);
+  CHECK(ntfscompact::classify_process_risk(L"WINWORD.EXE") ==
+        ProcessRisk::kHigh);
+  CHECK(ntfscompact::classify_process_risk(L"Code.exe") == ProcessRisk::kHigh);
+  CHECK(ntfscompact::classify_process_risk(L"lsass.exe") == ProcessRisk::kHigh);
+  CHECK(ntfscompact::classify_process_risk(L"svchost.exe") ==
+        ProcessRisk::kHigh);
+  CHECK(ntfscompact::classify_process_risk(L"winlogon.exe") ==
+        ProcessRisk::kHigh);
+}
+
+TEST_CASE("classify_process_risk：不在表内为未知，不冒充低风险") {
+  using ntfscompact::ProcessRisk;
+  CHECK(ntfscompact::classify_process_risk(L"unknown_app.exe") ==
+        ProcessRisk::kUnknown);
+  CHECK(ntfscompact::classify_process_risk(L"") == ProcessRisk::kUnknown);
+  CHECK(ntfscompact::classify_process_risk(L"explorer_backup.exe") ==
+        ProcessRisk::kUnknown);
+  CHECK(ntfscompact::classify_process_risk(L"searchindexer_tool.exe") ==
+        ProcessRisk::kUnknown);
+}
+
 TEST_CASE("probe_file_occupied：空闲不占用，零共享句柄报占用") {
   ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
   REQUIRE(tmp_dir->b_ok);

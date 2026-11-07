@@ -34,6 +34,57 @@ bool process_is_elevated() {
 
 namespace {
 
+std::wstring lowercase_name(const std::wstring& str_name) {
+  std::wstring str_lower{str_name};
+  for (wchar_t& ch_wide : str_lower) {
+    ch_wide = static_cast<wchar_t>(std::towlower(ch_wide));
+  }
+  return str_lower;
+}
+
+bool in_name_table(std::wstring_view str_name,
+                   std::span<const std::wstring_view> vec_table) {
+  for (const std::wstring_view str_entry : vec_table) {
+    if (str_name == str_entry) {
+      return true;
+    }
+  }
+  return false;
+}
+
+}
+
+ProcessRisk classify_process_risk(const std::wstring& str_process_name) {
+  const std::wstring str_lower{lowercase_name(str_process_name)};
+  static constexpr std::wstring_view kLowRiskNames[]{
+      L"searchindexer.exe",   L"searchprotocolhost.exe",
+      L"searchfilterhost.exe", L"msmpeng.exe",
+      L"nissrv.exe",          L"ntfscompact_hold.exe"};
+  static constexpr std::wstring_view kHighRiskNames[]{
+      L"explorer.exe",        L"winword.exe",        L"excel.exe",
+      L"powerpnt.exe",        L"outlook.exe",        L"notepad.exe",
+      L"notepad++.exe",       L"code.exe",           L"devenv.exe",
+      L"sublime_text.exe",    L"sqlservr.exe",       L"mysqld.exe",
+      L"postgres.exe",        L"mongod.exe",         L"redis-server.exe",
+      L"vmware-vmx.exe",      L"vmms.exe",           L"vmplayer.exe",
+      L"virtualbox.exe",      L"vboxsvc.exe",        L"vboxsdl.exe",
+      L"qemu-system-x86_64.exe", L"lsass.exe",       L"winlogon.exe",
+      L"wininit.exe",         L"csrss.exe",          L"smss.exe",
+      L"services.exe",        L"svchost.exe",        L"dwm.exe",
+      L"fontdrvhost.exe",     L"audiodg.exe",        L"conhost.exe",
+      L"dllhost.exe",         L"taskhostw.exe",      L"sihost.exe",
+      L"chrome.exe",          L"firefox.exe",        L"msedge.exe"};
+  if (in_name_table(str_lower, kLowRiskNames)) {
+    return ProcessRisk::kLow;
+  }
+  if (in_name_table(str_lower, kHighRiskNames)) {
+    return ProcessRisk::kHigh;
+  }
+  return ProcessRisk::kUnknown;
+}
+
+namespace {
+
 std::uint32_t escalation_delay_ms(const EscalationBackoff& eb_backoff,
                                   std::size_t u8_escalation,
                                   std::uint32_t u4_spent_ms) {
