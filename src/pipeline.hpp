@@ -7,6 +7,7 @@ import std;
 #include "dir_flag.hpp"
 #include "executor.hpp"
 #include "release.hpp"
+#include "scan.hpp"
 #include "uncompress.hpp"
 
 namespace ntfscompact {
@@ -222,7 +223,7 @@ inline std::wstring format_summary(const PipelineResult& pl_result,
   return str_line;
 }
 
-PipelineResult run_scan(const Options& opt_options, const DetectFn& fn_detect);
+ScanOutcome run_scan(const Options& opt_options);
 
 void collect_byte_stats(PipelineResult& pl_result);
 

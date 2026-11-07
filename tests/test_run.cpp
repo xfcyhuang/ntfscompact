@@ -17,13 +17,16 @@ using ntfscompact::DirFlagFn;
 using ntfscompact::ExecuteFn;
 using ntfscompact::ExecuteResult;
 using ntfscompact::FileReport;
+using ntfscompact::FlaggedDir;
 using ntfscompact::DetectFn;
 using ntfscompact::Options;
-using ntfscompact::PipelineResult;
 using ntfscompact::Plan;
 using ntfscompact::ReleaseFn;
 using ntfscompact::run_pipeline;
 using ntfscompact::run_scan;
+using ntfscompact::ScanItem;
+using ntfscompact::ScanOutcome;
+using ntfscompact::ScanSkip;
 using ntfscompact::UncompressFn;
 
 DetectionResult fake_detect(const std::wstring& str_long_path) {
@@ -166,16 +169,6 @@ std::wstring make_fixture(ntfscompact_test::TempDir& tmp_dir) {
   return ntfscompact_test::temp_path(tmp_dir);
 }
 
-const FileReport* find_report(const PipelineResult& pr_result,
-                              const wchar_t* ptr_name) {
-  for (const FileReport& fr_item : pr_result.vec_reports) {
-    if (fr_item.str_display_path.find(ptr_name) != std::wstring::npos) {
-      return &fr_item;
-    }
-  }
-  return nullptr;
-}
-
 std::wstring read_all(std::FILE* f_stream) {
   std::rewind(f_stream);
   std::wstring str_content{};
@@ -215,62 +208,107 @@ bool contains(const std::wstring& str_haystack, const std::wstring& str_needle) 
 
 }
 
-TEST_CASE("run_scan：各现状文件得到正确动作（注入假检测器）") {
+TEST_CASE("run_scan：零调用 detector——枚举期不触碰检测缝") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  const std::wstring str_dir{make_fixture(tmp_dir)};
+
+  int i4_detect_calls{0};
+  const DetectFn fn_detect{[&i4_detect_calls](const std::wstring&) {
+    ++i4_detect_calls;
+    return DetectionResult{};
+  }};
+
+  Options opt_case{compress_options()};
+  opt_case.vec_paths.push_back(str_dir);
+  const ScanOutcome so_scan{run_scan(opt_case)};
+  CHECK(i4_detect_calls == 0);
+
+  REQUIRE(so_scan.vec_items.size() == 7);
+  REQUIRE(so_scan.vec_skipped.size() == 1);
+  CHECK(contains(so_scan.vec_skipped[0].str_display_path, L"tiny.bin"));
+  CHECK(contains(so_scan.vec_skipped[0].str_reason, L"4KB"));
+  CHECK(so_scan.vec_flagged_dirs.empty());
+  CHECK(so_scan.vec_errors.empty());
+  for (const ScanItem& si_item : so_scan.vec_items) {
+    CHECK(si_item.str_long_path.starts_with(L"\\\\?\\"));
+    CHECK(si_item.u8_size == 8192);
+  }
+}
+
+TEST_CASE("run_scan：枚举产物——文件项/跳过/带标记目录与旧一致") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  const std::wstring str_dir{make_fixture(tmp_dir)};
+  REQUIRE(ntfscompact_test::temp_make_dir(tmp_dir, L"marked"));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"marked\\deep.bin", 8192));
+  REQUIRE(ntfscompact_test::mark_dir(ntfscompact_test::temp_sub(tmp_dir, L"marked")));
+
+  Options opt_case{compress_options()};
+  opt_case.vec_paths.push_back(str_dir);
+  const ScanOutcome so_scan{run_scan(opt_case)};
+
+  REQUIRE(so_scan.vec_items.size() == 8);
+  REQUIRE(so_scan.vec_skipped.size() == 1);
+  REQUIRE(so_scan.vec_flagged_dirs.size() == 1);
+  CHECK(so_scan.vec_errors.empty());
+
+  bool b_has_marked{false};
+  for (const FlaggedDir& fd_flag : so_scan.vec_flagged_dirs) {
+    b_has_marked = b_has_marked || contains(fd_flag.str_display_path, L"marked");
+    CHECK(fd_flag.str_long_path.starts_with(L"\\\\?\\"));
+  }
+  CHECK(b_has_marked);
+
+  std::size_t u8_named{0};
+  for (const ScanItem& si_item : so_scan.vec_items) {
+    for (const wchar_t* ptr_name : {L"plain.bin", L"wof8k.bin", L"woflzx.bin",
+                                    L"lznt1.bin", L"wim.bin", L"cloud.bin",
+                                    L"failme.bin", L"deep.bin"}) {
+      if (si_item.str_display_path.find(ptr_name) != std::wstring::npos) {
+        ++u8_named;
+      }
+    }
+  }
+  CHECK(u8_named == 8);
+  CHECK(contains(so_scan.vec_skipped[0].str_display_path, L"tiny.bin"));
+  CHECK(contains(so_scan.vec_skipped[0].str_reason, L"4KB"));
+}
+
+TEST_CASE("run_pipeline：干跑全 fixture 计划行——黑名单跳过与检测失败行") {
   ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
   const std::wstring str_dir{make_fixture(tmp_dir)};
 
   Options opt_case{compress_options()};
+  opt_case.b_dry_run = true;
   opt_case.vec_paths.push_back(str_dir);
   const DetectFn fn_detect{fake_detect};
-  const PipelineResult pr_result{run_scan(opt_case, fn_detect)};
+  ExecuteRecorder recorder{};
 
-  REQUIRE(pr_result.vec_reports.size() == 8);
-  CHECK(pr_result.i4_failures == 1);
+  std::FILE* f_out{std::tmpfile()};
+  std::FILE* f_err{std::tmpfile()};
+  REQUIRE(f_out != nullptr);
+  REQUIRE(f_err != nullptr);
+  const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
+                                UncompressFn{}, ReleaseFn{}, DirFlagFn{}, f_out, f_err)};
+  const std::wstring str_text{read_all(f_out)};
+  const std::wstring str_err_text{read_all(f_err)};
+  std::fclose(f_out);
+  std::fclose(f_err);
 
-  const FileReport* ptr_plain{find_report(pr_result, L"plain.bin")};
-  REQUIRE(ptr_plain != nullptr);
-  CHECK(ptr_plain->str_error.empty());
-  CHECK(ptr_plain->pl_plan.e_action == Plan::Action::kCompress);
-  CHECK(ptr_plain->b_has_state);
-  CHECK(ptr_plain->cs_state.e_kind == CurrentState::Kind::kNone);
-
-  const FileReport* ptr_wof8k{find_report(pr_result, L"wof8k.bin")};
-  REQUIRE(ptr_wof8k != nullptr);
-  CHECK(ptr_wof8k->pl_plan.e_action == Plan::Action::kSkip);
-  CHECK(contains(ptr_wof8k->pl_plan.str_reason, L"指定算法"));
-
-  const FileReport* ptr_woflzx{find_report(pr_result, L"woflzx.bin")};
-  REQUIRE(ptr_woflzx != nullptr);
-  CHECK(ptr_woflzx->pl_plan.e_action == Plan::Action::kRecompress);
-  CHECK(ptr_woflzx->cs_state.e_algorithm == Algorithm::kLzx);
-
-  const FileReport* ptr_lznt1{find_report(pr_result, L"lznt1.bin")};
-  REQUIRE(ptr_lznt1 != nullptr);
-  CHECK(ptr_lznt1->pl_plan.e_action == Plan::Action::kRecompress);
-
-  const FileReport* ptr_wim{find_report(pr_result, L"wim.bin")};
-  REQUIRE(ptr_wim != nullptr);
-  CHECK(ptr_wim->pl_plan.e_action == Plan::Action::kSkip);
-  CHECK(contains(ptr_wim->pl_plan.str_reason, L"WIM"));
-
-  const FileReport* ptr_cloud{find_report(pr_result, L"cloud.bin")};
-  REQUIRE(ptr_cloud != nullptr);
-  CHECK(ptr_cloud->pl_plan.e_action == Plan::Action::kSkip);
-  CHECK(contains(ptr_cloud->pl_plan.str_reason, L"Cloud"));
-
-  const FileReport* ptr_failme{find_report(pr_result, L"failme.bin")};
-  REQUIRE(ptr_failme != nullptr);
-  CHECK_FALSE(ptr_failme->str_error.empty());
-  CHECK(contains(ptr_failme->str_error, L"现状检测失败"));
-
-  const FileReport* ptr_tiny{find_report(pr_result, L"tiny.bin")};
-  REQUIRE(ptr_tiny != nullptr);
-  CHECK(ptr_tiny->pl_plan.e_action == Plan::Action::kSkip);
-  CHECK(contains(ptr_tiny->pl_plan.str_reason, L"4KB"));
-  CHECK_FALSE(ptr_tiny->b_has_state);
+  CHECK(i4_code == 1);
+  CHECK(recorder.vec_calls.empty());
+  CHECK(contains(str_text, L"wof8k.bin：已是指定算法 xpress8k"));
+  CHECK(contains(str_text, L"woflzx.bin：现状 lzx（WOF），将重压为指定算法 xpress8k"));
+  CHECK(contains(str_text, L"lznt1.bin：现状 LZNT1，将重压为指定算法 xpress8k"));
+  CHECK(contains(str_text, L"plain.bin：现状 未压缩，将压缩为指定算法 xpress8k"));
+  CHECK(contains(str_text, L"wim.bin：WIM backing 文件（黑名单）"));
+  CHECK(contains(str_text, L"cloud.bin：Cloud backing 文件（黑名单）"));
+  CHECK(contains(str_text, L"tiny.bin：文件大小 ≤4KB"));
+  CHECK(contains(str_err_text, L"failme.bin：现状检测失败（模拟）"));
+  CHECK(contains(str_text, L"共 8 个文件：压缩 1、重压 2、解压 0、跳过 4；失败 1"));
 }
 
-TEST_CASE("run_scan：解压模式下各文件动作") {
+TEST_CASE("run_pipeline：解压模式干跑——各文件动作行") {
   ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
   REQUIRE(tmp_dir->b_ok);
   REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"plain.bin", 8192));
@@ -279,19 +317,24 @@ TEST_CASE("run_scan：解压模式下各文件动作") {
 
   Options opt_case{};
   opt_case.b_uncompress = true;
+  opt_case.b_dry_run = true;
   opt_case.vec_paths.push_back(ntfscompact_test::temp_path(tmp_dir));
   const DetectFn fn_detect{fake_detect};
-  const PipelineResult pr_result{run_scan(opt_case, fn_detect)};
+  ExecuteRecorder recorder{};
 
-  const FileReport* ptr_plain{find_report(pr_result, L"plain.bin")};
-  REQUIRE(ptr_plain != nullptr);
-  CHECK(ptr_plain->pl_plan.e_action == Plan::Action::kSkip);
-  const FileReport* ptr_woflzx{find_report(pr_result, L"woflzx.bin")};
-  REQUIRE(ptr_woflzx != nullptr);
-  CHECK(ptr_woflzx->pl_plan.e_action == Plan::Action::kUncompress);
-  const FileReport* ptr_lznt1{find_report(pr_result, L"lznt1.bin")};
-  REQUIRE(ptr_lznt1 != nullptr);
-  CHECK(ptr_lznt1->pl_plan.e_action == Plan::Action::kUncompress);
+  std::FILE* f_out{std::tmpfile()};
+  REQUIRE(f_out != nullptr);
+  const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
+                                UncompressFn{}, ReleaseFn{}, DirFlagFn{}, f_out, f_out)};
+  const std::wstring str_text{read_all(f_out)};
+  std::fclose(f_out);
+
+  CHECK(i4_code == 0);
+  CHECK(recorder.vec_calls.empty());
+  CHECK(contains(str_text, L"plain.bin：未压缩"));
+  CHECK(contains(str_text, L"woflzx.bin：现状 lzx（WOF），将解压"));
+  CHECK(contains(str_text, L"lznt1.bin：现状 LZNT1，将解压"));
+  CHECK(contains(str_text, L"共 3 个文件：压缩 0、重压 0、解压 2、跳过 1"));
 }
 
 TEST_CASE("run_pipeline：干跑输出每文件计划行与汇总，不执行，退出码 0") {

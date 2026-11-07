@@ -100,6 +100,22 @@ void emit_report(const FileReport& fr_report, const Options& opt_options,
   }
 }
 
+FileReport make_skip_report(const ScanSkip& sk_skip) {
+  FileReport fr_report{};
+  fr_report.str_display_path = sk_skip.str_display_path;
+  fr_report.b_has_state = false;
+  fr_report.pl_plan.e_action = Plan::Action::kSkip;
+  fr_report.pl_plan.str_reason = sk_skip.str_reason;
+  return fr_report;
+}
+
+FileReport make_scan_error_report(const ScanError& se_error) {
+  FileReport fr_report{};
+  fr_report.str_display_path = se_error.str_display_path;
+  fr_report.str_error = se_error.str_message;
+  return fr_report;
+}
+
 
 }
 
@@ -117,50 +133,10 @@ void collect_byte_stats(PipelineResult& pl_result) {
   }
 }
 
-PipelineResult run_scan(const Options& opt_options, const DetectFn& fn_detect) {
-  PipelineResult pl_result{};
+ScanOutcome run_scan(const Options& opt_options) {
   ScanOutcome so_scan{};
   scan_paths(opt_options.vec_paths, so_scan);
-
-  for (const ScanSkip& sk_skip : so_scan.vec_skipped) {
-    FileReport fr_report{};
-    fr_report.str_display_path = sk_skip.str_display_path;
-    fr_report.b_has_state = false;
-    fr_report.pl_plan.e_action = Plan::Action::kSkip;
-    fr_report.pl_plan.str_reason = sk_skip.str_reason;
-    pl_result.vec_reports.push_back(fr_report);
-  }
-  for (const FlaggedDir& fd_flag : so_scan.vec_flagged_dirs) {
-    DirFlagReport df_report{};
-    df_report.str_display_path = fd_flag.str_display_path;
-    df_report.str_long_path = fd_flag.str_long_path;
-    pl_result.vec_dir_flags.push_back(df_report);
-  }
-  for (const ScanItem& si_item : so_scan.vec_items) {
-    FileReport fr_report{};
-    fr_report.str_display_path = si_item.str_display_path;
-    fr_report.str_long_path = si_item.str_long_path;
-    fr_report.u8_logical_size = si_item.u8_size;
-    const DetectionResult dr_detect{fn_detect(si_item.str_long_path)};
-    if (!dr_detect.str_error.empty()) {
-      fr_report.str_error = dr_detect.str_error;
-      ++pl_result.i4_failures;
-      pl_result.vec_reports.push_back(fr_report);
-      continue;
-    }
-    fr_report.b_has_state = true;
-    fr_report.cs_state = dr_detect.cs_state;
-    fr_report.pl_plan = decide_action(dr_detect.cs_state, opt_options);
-    pl_result.vec_reports.push_back(fr_report);
-  }
-  for (const ScanError& se_error : so_scan.vec_errors) {
-    FileReport fr_report{};
-    fr_report.str_display_path = se_error.str_display_path;
-    fr_report.str_error = se_error.str_message;
-    ++pl_result.i4_failures;
-    pl_result.vec_reports.push_back(fr_report);
-  }
-  return pl_result;
+  return so_scan;
 }
 
 int run_pipeline(const Options& opt_options, const DetectFn& fn_detect,
@@ -168,7 +144,17 @@ int run_pipeline(const Options& opt_options, const DetectFn& fn_detect,
                  const UncompressFn& fn_uncompress, const ReleaseFn& fn_release,
                  const DirFlagFn& fn_dir_flag, std::FILE* f_out,
                  std::FILE* f_err) {
-  PipelineResult pl_result{run_scan(opt_options, fn_detect)};
+  PipelineResult pl_result{};
+  const ScanOutcome so_scan{run_scan(opt_options)};
+  for (const ScanSkip& sk_skip : so_scan.vec_skipped) {
+    pl_result.vec_reports.push_back(make_skip_report(sk_skip));
+  }
+  for (const FlaggedDir& fd_flag : so_scan.vec_flagged_dirs) {
+    DirFlagReport df_report{};
+    df_report.str_display_path = fd_flag.str_display_path;
+    df_report.str_long_path = fd_flag.str_long_path;
+    pl_result.vec_dir_flags.push_back(df_report);
+  }
 
   if (!opt_options.b_dry_run) {
     for (DirFlagReport& df_report : pl_result.vec_dir_flags) {
@@ -191,108 +177,134 @@ int run_pipeline(const Options& opt_options, const DetectFn& fn_detect,
         write_utf8(f_out, format_dir_flag_line(df_report, opt_options) + L"\n");
       }
     }
-    for (FileReport& fr_report : pl_result.vec_reports) {
-      if (!fr_report.str_error.empty()) {
-        emit_report(fr_report, opt_options, f_out, f_err);
-        continue;
-      }
-      switch (fr_report.pl_plan.e_action) {
-        case Plan::Action::kCompress:
-        case Plan::Action::kRecompress: {
-          ReleaseGate gate_ensure{
-              ensure_released(fr_report.str_long_path, fn_release)};
-          if (!gate_ensure.b_busy) {
-            append_released(fr_report.vec_released, gate_ensure.vec_released);
-            fr_report.er_exec =
-                fn_execute(fr_report.str_long_path,
-                           fr_report.pl_plan.e_action, fr_report.cs_state,
-                           opt_options.e_algorithm);
-            fr_report.b_executed = true;
-            if (fn_release && fr_report.b_executed &&
-                fr_report.er_exec.e_outcome ==
-                    ExecuteResult::Outcome::kError &&
-                fr_report.er_exec.u4_error == kWin32SharingViolation) {
-              ReleaseGate gate_retry{
-                  gate_release(fr_report.str_long_path, fn_release)};
-              if (gate_retry.b_busy) {
-                append_released(fr_report.vec_released,
-                                gate_retry.vec_released);
-                mark_busy_skip(fr_report, gate_retry.str_busy_reason);
-              } else {
-                append_released(fr_report.vec_released,
-                                gate_retry.vec_released);
-                fr_report.er_exec =
-                    fn_execute(fr_report.str_long_path,
-                               fr_report.pl_plan.e_action,
-                               fr_report.cs_state,
-                               opt_options.e_algorithm);
-                if (fr_report.er_exec.e_outcome ==
-                        ExecuteResult::Outcome::kError &&
-                    fr_report.er_exec.u4_error == kWin32SharingViolation) {
-                  mark_busy_skip(
-                      fr_report,
-                      L"占用不可释放：升级释放后重试执行仍报占用（错误码 32）");
-                }
-              }
-            }
-          } else {
-            append_released(fr_report.vec_released, gate_ensure.vec_released);
-            mark_busy_skip(fr_report, gate_ensure.str_busy_reason);
-          }
-          if (fr_report.b_executed &&
-              fr_report.er_exec.e_outcome == ExecuteResult::Outcome::kSuccess) {
-            fr_report.u8_disk_size =
-                query_disk_usage(fr_report.str_long_path,
-                                 fr_report.u8_logical_size);
-          }
-          if (fr_report.b_executed &&
-              fr_report.er_exec.e_outcome == ExecuteResult::Outcome::kError) {
-            ++pl_result.i4_failures;
-          }
-          break;
-        }
-        case Plan::Action::kUncompress: {
-          if (!fn_uncompress) {
-            fr_report.str_error = L"解压器未接线";
-            ++pl_result.i4_failures;
-            break;
-          }
-          ReleaseGate gate_ensure{
-              ensure_released(fr_report.str_long_path, fn_release)};
-          if (gate_ensure.b_busy) {
-            append_released(fr_report.vec_released, gate_ensure.vec_released);
-            mark_busy_skip(fr_report, gate_ensure.str_busy_reason);
-            break;
-          }
-          append_released(fr_report.vec_released, gate_ensure.vec_released);
-          const std::expected<void, std::wstring> xe_uncompress{
-              fn_uncompress(fr_report.str_long_path)};
-          fr_report.b_executed = true;
-          if (!xe_uncompress.has_value()) {
-            fr_report.str_error = xe_uncompress.error();
-            ++pl_result.i4_failures;
-          }
-          break;
-        }
-        case Plan::Action::kSkip:
-          break;
-      }
-      emit_report(fr_report, opt_options, f_out, f_err);
-    }
   }
-
-  collect_byte_stats(pl_result);
-
   if (opt_options.b_dry_run) {
     for (const DirFlagReport& df_report : pl_result.vec_dir_flags) {
       if (!opt_options.b_quiet) {
         write_utf8(f_out, format_dir_flag_line(df_report, opt_options) + L"\n");
       }
     }
-    for (const FileReport& fr_report : pl_result.vec_reports) {
-      emit_report(fr_report, opt_options, f_out, f_err);
-    }
   }
+
+  for (const FileReport& fr_skip : pl_result.vec_reports) {
+    emit_report(fr_skip, opt_options, f_out, f_err);
+  }
+
+  for (const ScanItem& si_item : so_scan.vec_items) {
+    FileReport fr_report{};
+    fr_report.str_display_path = si_item.str_display_path;
+    fr_report.str_long_path = si_item.str_long_path;
+    fr_report.u8_logical_size = si_item.u8_size;
+    const DetectionResult dr_detect{fn_detect(si_item.str_long_path)};
+    if (!dr_detect.str_error.empty()) {
+      fr_report.str_error = dr_detect.str_error;
+      ++pl_result.i4_failures;
+      pl_result.vec_reports.push_back(fr_report);
+      emit_report(fr_report, opt_options, f_out, f_err);
+      continue;
+    }
+    fr_report.b_has_state = true;
+    fr_report.cs_state = dr_detect.cs_state;
+    fr_report.pl_plan = decide_action(dr_detect.cs_state, opt_options);
+    if (opt_options.b_dry_run) {
+      pl_result.vec_reports.push_back(fr_report);
+      emit_report(fr_report, opt_options, f_out, f_err);
+      continue;
+    }
+    switch (fr_report.pl_plan.e_action) {
+      case Plan::Action::kCompress:
+      case Plan::Action::kRecompress: {
+        ReleaseGate gate_ensure{
+            ensure_released(fr_report.str_long_path, fn_release)};
+        if (!gate_ensure.b_busy) {
+          append_released(fr_report.vec_released, gate_ensure.vec_released);
+          fr_report.er_exec =
+              fn_execute(fr_report.str_long_path,
+                         fr_report.pl_plan.e_action, fr_report.cs_state,
+                         opt_options.e_algorithm);
+          fr_report.b_executed = true;
+          if (fn_release && fr_report.b_executed &&
+              fr_report.er_exec.e_outcome ==
+                  ExecuteResult::Outcome::kError &&
+              fr_report.er_exec.u4_error == kWin32SharingViolation) {
+            ReleaseGate gate_retry{
+                gate_release(fr_report.str_long_path, fn_release)};
+            if (gate_retry.b_busy) {
+              append_released(fr_report.vec_released,
+                              gate_retry.vec_released);
+              mark_busy_skip(fr_report, gate_retry.str_busy_reason);
+            } else {
+              append_released(fr_report.vec_released,
+                              gate_retry.vec_released);
+              fr_report.er_exec =
+                  fn_execute(fr_report.str_long_path,
+                             fr_report.pl_plan.e_action,
+                             fr_report.cs_state,
+                             opt_options.e_algorithm);
+              if (fr_report.er_exec.e_outcome ==
+                      ExecuteResult::Outcome::kError &&
+                  fr_report.er_exec.u4_error == kWin32SharingViolation) {
+                mark_busy_skip(
+                    fr_report,
+                    L"占用不可释放：升级释放后重试执行仍报占用（错误码 32）");
+              }
+            }
+          }
+        } else {
+          append_released(fr_report.vec_released, gate_ensure.vec_released);
+          mark_busy_skip(fr_report, gate_ensure.str_busy_reason);
+        }
+        if (fr_report.b_executed &&
+            fr_report.er_exec.e_outcome == ExecuteResult::Outcome::kSuccess) {
+          fr_report.u8_disk_size =
+              query_disk_usage(fr_report.str_long_path,
+                               fr_report.u8_logical_size);
+        }
+        if (fr_report.b_executed &&
+            fr_report.er_exec.e_outcome == ExecuteResult::Outcome::kError) {
+          ++pl_result.i4_failures;
+        }
+        break;
+      }
+      case Plan::Action::kUncompress: {
+        if (!fn_uncompress) {
+          fr_report.str_error = L"解压器未接线";
+          ++pl_result.i4_failures;
+          break;
+        }
+        ReleaseGate gate_ensure{
+            ensure_released(fr_report.str_long_path, fn_release)};
+        if (gate_ensure.b_busy) {
+          append_released(fr_report.vec_released, gate_ensure.vec_released);
+          mark_busy_skip(fr_report, gate_ensure.str_busy_reason);
+          break;
+        }
+        append_released(fr_report.vec_released, gate_ensure.vec_released);
+        const std::expected<void, std::wstring> xe_uncompress{
+            fn_uncompress(fr_report.str_long_path)};
+        fr_report.b_executed = true;
+        if (!xe_uncompress.has_value()) {
+          fr_report.str_error = xe_uncompress.error();
+          ++pl_result.i4_failures;
+        }
+        break;
+      }
+      case Plan::Action::kSkip:
+        break;
+    }
+    pl_result.vec_reports.push_back(fr_report);
+    emit_report(fr_report, opt_options, f_out, f_err);
+  }
+
+  for (const ScanError& se_error : so_scan.vec_errors) {
+    FileReport fr_report{make_scan_error_report(se_error)};
+    ++pl_result.i4_failures;
+    pl_result.vec_reports.push_back(fr_report);
+    emit_report(fr_report, opt_options, f_out, f_err);
+  }
+
+  collect_byte_stats(pl_result);
+
   write_utf8(f_out, format_summary(pl_result, opt_options) + L"\n");
   return pl_result.i4_failures > 0 ? 1 : 0;
 }
