@@ -60,7 +60,7 @@ ProcessRisk classify_process_risk(const std::wstring& str_process_name) {
   static constexpr std::wstring_view kLowRiskNames[]{
       L"searchindexer.exe",   L"searchprotocolhost.exe",
       L"searchfilterhost.exe", L"msmpeng.exe",
-      L"nissrv.exe",          L"ntfscompact_hold.exe"};
+      L"nissrv.exe"};
   static constexpr std::wstring_view kHighRiskNames[]{
       L"explorer.exe",        L"winword.exe",        L"excel.exe",
       L"powerpnt.exe",        L"outlook.exe",        L"notepad.exe",
@@ -265,7 +265,9 @@ std::vector<HandleOwner> find_target_file_handles(
     if (str_final.empty() || !same_file_path(str_final, str_long_path)) {
       continue;
     }
-    vec_owners.push_back(HandleOwner{u4_pid, he_entry.u8_handle});
+    vec_owners.push_back(HandleOwner{
+        u4_pid, he_entry.u8_handle,
+        static_cast<std::uint32_t>(he_entry.u4_granted_access)});
   }
   for (auto& [u4_pid, h_proc] : map_proc) {
     if (h_proc != nullptr) {
@@ -338,7 +340,11 @@ ReleaseFn make_handle_force_level(bool b_allow_all,
       ro_busy.str_detail = L"句柄强关需管理员权限，当前非提权，本级止步";
       return ro_busy;
     }
-    const std::vector<HandleOwner> vec_owners{fn_find_handles(str_long_path)};
+    std::vector<HandleOwner> vec_owners{fn_find_handles(str_long_path)};
+    std::erase_if(vec_owners, [](const HandleOwner& ho_owner) {
+      return (ho_owner.u4_granted_access &
+              (FILE_READ_DATA | FILE_WRITE_DATA)) == 0;
+    });
     const std::vector<std::uint32_t> vec_pids{ordered_owner_pids(vec_owners)};
     std::vector<ClosedProcess> vec_closed{};
     std::vector<std::wstring> vec_gate_skipped{};

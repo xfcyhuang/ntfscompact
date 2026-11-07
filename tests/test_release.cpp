@@ -191,6 +191,8 @@ struct HandleCloseCall {
   std::uintptr_t u8_handle{0};
 };
 
+constexpr std::uint32_t kDataAccess{FILE_READ_DATA | FILE_WRITE_DATA};
+
 struct FakeHandleDeps {
   bool b_elevated{true};
   std::vector<ntfscompact::HandleOwner> vec_owners{};
@@ -230,8 +232,6 @@ TEST_CASE("classify_process_risk：低风险占用者入表") {
         ProcessRisk::kLow);
   CHECK(ntfscompact::classify_process_risk(L"MsMpEng.exe") == ProcessRisk::kLow);
   CHECK(ntfscompact::classify_process_risk(L"NisSrv.exe") == ProcessRisk::kLow);
-  CHECK(ntfscompact::classify_process_risk(L"ntfscompact_hold.exe") ==
-        ProcessRisk::kLow);
 }
 
 TEST_CASE("classify_process_risk：explorer 与数据库/虚拟机/编辑器/系统关键进程高风险") {
@@ -263,6 +263,8 @@ TEST_CASE("classify_process_risk：不在表内为未知，不冒充低风险") 
   CHECK(ntfscompact::classify_process_risk(L"explorer_backup.exe") ==
         ProcessRisk::kUnknown);
   CHECK(ntfscompact::classify_process_risk(L"searchindexer_tool.exe") ==
+        ProcessRisk::kUnknown);
+  CHECK(ntfscompact::classify_process_risk(L"ntfscompact_hold.exe") ==
         ProcessRisk::kUnknown);
 }
 
@@ -567,7 +569,7 @@ TEST_CASE("make_handle_force_level：非提权直接止步并如实报告，不�
 
   FakeHandleDeps fake_deps{};
   fake_deps.b_elevated = false;
-  fake_deps.vec_owners = {{4321, 100}};
+  fake_deps.vec_owners = {{4321, 100, kDataAccess}};
   const auto fn_level{
       ntfscompact::make_handle_force_level(false, fake_deps.deps())};
   const ntfscompact::ReleaseOutcome ro_outcome{fn_level(str_file)};
@@ -591,7 +593,8 @@ TEST_CASE("make_handle_force_level：默认闸门只关低风险占用者，高�
   REQUIRE(h_lock != INVALID_HANDLE_VALUE);
 
   FakeHandleDeps fake_deps{};
-  fake_deps.vec_owners = {{101, 11}, {202, 22}, {101, 12}};
+  fake_deps.vec_owners = {
+      {101, 11, kDataAccess}, {202, 22, kDataAccess}, {101, 12, kDataAccess}};
   fake_deps.map_names = {{101, L"SearchIndexer.exe"}, {202, L"explorer.exe"}};
   const auto fn_level{
       ntfscompact::make_handle_force_level(false, fake_deps.deps())};
@@ -623,7 +626,7 @@ TEST_CASE("make_handle_force_level：--force-close-all 放行全部占用者") {
   REQUIRE(h_lock != INVALID_HANDLE_VALUE);
 
   FakeHandleDeps fake_deps{};
-  fake_deps.vec_owners = {{101, 11}, {202, 22}};
+  fake_deps.vec_owners = {{101, 11, kDataAccess}, {202, 22, kDataAccess}};
   fake_deps.map_names = {{101, L"SearchIndexer.exe"}, {202, L"explorer.exe"}};
   const auto fn_level{
       ntfscompact::make_handle_force_level(true, fake_deps.deps())};
@@ -645,7 +648,7 @@ TEST_CASE("make_handle_force_level：低风险强关后文件释放报成功带�
   REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"held.bin", 8192));
 
   FakeHandleDeps fake_deps{};
-  fake_deps.vec_owners = {{303, 33}};
+  fake_deps.vec_owners = {{303, 33, kDataAccess}};
   fake_deps.map_names = {{303, L"searchfilterhost.exe"}};
   const auto fn_level{
       ntfscompact::make_handle_force_level(false, fake_deps.deps())};
@@ -670,7 +673,7 @@ TEST_CASE("make_handle_force_level：进程名取不到即自然止步不崩") {
   REQUIRE(h_lock != INVALID_HANDLE_VALUE);
 
   FakeHandleDeps fake_deps{};
-  fake_deps.vec_owners = {{404, 44}, {505, 55}};
+  fake_deps.vec_owners = {{404, 44, kDataAccess}, {505, 55, kDataAccess}};
   fake_deps.map_names = {{404, L""}, {505, L"msmpeng.exe"}};
   const auto fn_level{
       ntfscompact::make_handle_force_level(false, fake_deps.deps())};
@@ -695,7 +698,7 @@ TEST_CASE("make_handle_force_level：句柄关不动（拒绝访问）自然止�
   REQUIRE(h_lock != INVALID_HANDLE_VALUE);
 
   FakeHandleDeps fake_deps{};
-  fake_deps.vec_owners = {{606, 66}};
+  fake_deps.vec_owners = {{606, 66, kDataAccess}};
   fake_deps.map_names = {{606, L"lsass.exe"}};
   ntfscompact::HandleForceDeps deps_handle{fake_deps.deps()};
   deps_handle.fn_close_handle = [](std::uint32_t, std::uintptr_t) {
@@ -721,7 +724,7 @@ TEST_CASE("make_handle_force_level：自身 PID 句柄被过滤不强关自己")
   REQUIRE(h_lock != INVALID_HANDLE_VALUE);
 
   FakeHandleDeps fake_deps{};
-  fake_deps.vec_owners = {{GetCurrentProcessId(), 77}};
+  fake_deps.vec_owners = {{GetCurrentProcessId(), 77, kDataAccess}};
   const auto fn_level{
       ntfscompact::make_handle_force_level(true, fake_deps.deps())};
   const ntfscompact::ReleaseOutcome ro_outcome{fn_level(str_file)};
@@ -730,6 +733,33 @@ TEST_CASE("make_handle_force_level：自身 PID 句柄被过滤不强关自己")
   CHECK(fake_deps.vec_close_calls.empty());
   CHECK(ro_outcome.vec_closed.empty());
   CHECK(ro_outcome.e_status == ntfscompact::ReleaseOutcome::Status::kBusy);
+}
+
+TEST_CASE("make_handle_force_level：无数据访问句柄不入强关集合") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  const std::wstring str_file{ntfscompact_test::temp_long_api_path(
+      ntfscompact_test::temp_sub(tmp_dir, L"held.bin"))};
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"held.bin", 8192));
+
+  FakeHandleDeps fake_deps{};
+  fake_deps.vec_owners = {{707, 88, kDataAccess},
+                          {707, 99, FILE_READ_ATTRIBUTES},
+                          {808, 101, 0}};
+  fake_deps.map_names = {{707, L"searchindexer.exe"},
+                         {808, L"searchprotocolhost.exe"}};
+  const auto fn_level{
+      ntfscompact::make_handle_force_level(false, fake_deps.deps())};
+  const ntfscompact::ReleaseOutcome ro_outcome{fn_level(str_file)};
+
+  REQUIRE(fake_deps.vec_close_calls.size() == 1);
+  CHECK(fake_deps.vec_close_calls[0].u4_pid == 707);
+  CHECK(fake_deps.vec_close_calls[0].u8_handle == 88);
+  CHECK(ro_outcome.e_status == ntfscompact::ReleaseOutcome::Status::kReleased);
+  CHECK(ro_outcome.e_level == ntfscompact::ReleaseOutcome::Level::kHandle);
+  REQUIRE(ro_outcome.vec_closed.size() == 1);
+  CHECK(ro_outcome.vec_closed[0].u4_pid == 707);
+  CHECK(ro_outcome.vec_closed[0].str_name == L"searchindexer.exe");
 }
 
 TEST_CASE("make_oplock_level：独占持有者不参与 oplock 协议，快速降级不拖预算") {
@@ -829,7 +859,7 @@ TEST_CASE("make_escalating_releaser：RM 两级假败后句柄强关级可达（
         ro_busy.str_detail = L"RM 强制关失败（模拟）";
         return ro_busy;
       }};
-  const auto xe_handle{ntfscompact::make_handle_force_level(false)};
+  const auto xe_handle{ntfscompact::make_handle_force_level(true)};
   const auto xe_chain{ntfscompact::make_escalating_releaser(
       {ntfscompact::make_oplock_level(100), std::move(fn_fake_graceful),
        std::move(fn_fake_force), std::move(xe_handle)},

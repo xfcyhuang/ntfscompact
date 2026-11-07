@@ -37,6 +37,7 @@ ProcessRisk classify_process_risk(const std::wstring& str_process_name);
 struct HandleOwner {
   std::uint32_t u4_pid{0};
   std::uintptr_t u8_handle{0};
+  std::uint32_t u4_granted_access{0};
 };
 
 struct HandleForceDeps {

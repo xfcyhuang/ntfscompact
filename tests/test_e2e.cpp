@@ -687,7 +687,7 @@ TEST_CASE("e2e_release：链尽跳过——非提权如实止步不终结占用�
   REQUIRE(wait_file_occupied(str_deep_long));
 
   ToolRun run_compress{};
-  REQUIRE(run_tool(L"\"" + str_deep_long + L"\" \"" +
+  REQUIRE(run_tool(L"--force-close-all \"" + str_deep_long + L"\" \"" +
                        ntfscompact_test::temp_long_api_path(str_free) + L"\"",
                    run_compress));
   if (ntfscompact::process_is_elevated()) {
