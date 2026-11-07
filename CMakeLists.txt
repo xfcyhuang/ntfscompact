@@ -64,6 +64,10 @@ add_executable(ntfscompact_release_tests tests/test_release.cpp)
 target_link_libraries(ntfscompact_release_tests PRIVATE ntfscompact_core)
 add_test(NAME release_real COMMAND ntfscompact_release_tests)
 
+add_executable(ntfscompact_hold tests/hold_app.cpp)
+target_link_options(ntfscompact_hold PRIVATE -municode -mwindows)
+target_link_libraries(ntfscompact_hold PRIVATE shell32)
+
 add_executable(ntfscompact_e2e_tests tests/test_e2e.cpp)
 target_link_libraries(ntfscompact_e2e_tests PRIVATE ntfscompact_core)
 target_link_options(ntfscompact_e2e_tests PRIVATE -municode)

@@ -39,6 +39,10 @@ std::wstring level_display_name(ReleaseOutcome::Level e_level);
 std::expected<ReleaseFn, std::wstring> make_escalating_releaser(
     std::vector<ReleaseFn> vec_levels, const EscalationBackoff& eb_backoff);
 
+std::expected<ReleaseFn, std::wstring> make_rm_graceful_level();
+
+std::expected<ReleaseFn, std::wstring> make_rm_force_level();
+
 std::expected<ReleaseFn, std::wstring> make_real_releaser(
     const DismountFn& fn_dismount);
 

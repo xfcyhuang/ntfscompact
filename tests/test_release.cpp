@@ -66,6 +66,90 @@ ntfscompact::EscalationBackoff make_test_backoff(SleepRecorder& rec_sleep,
   return eb_backoff;
 }
 
+struct HoldChild {
+  HANDLE h_process{INVALID_HANDLE_VALUE};
+  HANDLE h_thread{INVALID_HANDLE_VALUE};
+  DWORD u4_pid{0};
+};
+
+struct HoldChildReleaser {
+  void operator()(HoldChild* ptr_child) const {
+    if (ptr_child != nullptr) {
+      if (ptr_child->h_process != INVALID_HANDLE_VALUE &&
+          WaitForSingleObject(ptr_child->h_process, 0) == WAIT_TIMEOUT) {
+        TerminateProcess(ptr_child->h_process, 1);
+        WaitForSingleObject(ptr_child->h_process, 5000);
+      }
+      if (ptr_child->h_process != INVALID_HANDLE_VALUE) {
+        CloseHandle(ptr_child->h_process);
+      }
+      if (ptr_child->h_thread != INVALID_HANDLE_VALUE) {
+        CloseHandle(ptr_child->h_thread);
+      }
+      delete ptr_child;
+    }
+  }
+};
+
+using HoldChildPtr = std::unique_ptr<HoldChild, HoldChildReleaser>;
+
+std::wstring hold_exe_path() {
+  wchar_t arr_module[MAX_PATH]{};
+  const DWORD u4_len{GetModuleFileNameW(nullptr, arr_module, MAX_PATH)};
+  const std::wstring str_module{arr_module, u4_len};
+  const std::size_t u8_slash{str_module.find_last_of(L"\\")};
+  return str_module.substr(0, u8_slash) + L"\\ntfscompact_hold.exe";
+}
+
+HoldChildPtr spawn_hold_child(const std::wstring& str_hold_exe,
+                              const std::wstring& str_file, bool b_stubborn) {
+  std::wstring str_cmd{L"\"" + str_hold_exe + L"\" \"" + str_file + L"\""};
+  if (b_stubborn) {
+    str_cmd += L" --stubborn";
+  }
+  STARTUPINFOW si_start{};
+  si_start.cb = sizeof(si_start);
+  PROCESS_INFORMATION pi_process{};
+  const BOOL b_ok{CreateProcessW(str_hold_exe.c_str(), str_cmd.data(), nullptr,
+                                 nullptr, FALSE, 0, nullptr, nullptr, &si_start,
+                                 &pi_process)};
+  if (b_ok == FALSE) {
+    return HoldChildPtr{};
+  }
+  HoldChildPtr up_child{new HoldChild{}};
+  up_child->h_process = pi_process.hProcess;
+  up_child->h_thread = pi_process.hThread;
+  up_child->u4_pid = pi_process.dwProcessId;
+  return up_child;
+}
+
+bool wait_file_occupied(const std::wstring& str_file) {
+  for (int i4_attempt{0}; i4_attempt < 100; ++i4_attempt) {
+    if (ntfscompact::probe_file_occupied(str_file)) {
+      return true;
+    }
+    Sleep(50);
+  }
+  return false;
+}
+
+bool wait_child_exit(HANDLE h_process, DWORD u4_timeout_ms, DWORD& u4_code) {
+  if (WaitForSingleObject(h_process, u4_timeout_ms) != WAIT_OBJECT_0) {
+    return false;
+  }
+  return GetExitCodeProcess(h_process, &u4_code) != FALSE;
+}
+
+std::wstring closed_pid_name(const std::vector<ntfscompact::ClosedProcess>& vec_closed,
+                             std::uint32_t u4_pid) {
+  for (const ntfscompact::ClosedProcess& cp_item : vec_closed) {
+    if (cp_item.u4_pid == u4_pid) {
+      return cp_item.str_name;
+    }
+  }
+  return L"";
+}
+
 bool write_compressible(const std::wstring& str_long_path) {
   HANDLE h_file{CreateFileW(str_long_path.c_str(), GENERIC_WRITE, 0, nullptr,
                             CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr)};
@@ -290,6 +374,92 @@ TEST_CASE("make_escalating_releaser：退避探测发现已释放即止不再晋
   CHECK(ro_outcome.e_level == ntfscompact::ReleaseOutcome::Level::kRmGraceful);
   CHECK(vec_calls.size() == 1);
   CHECK(rec_sleep.vec_ms == std::vector<std::uint32_t>{100});
+}
+
+TEST_CASE("make_real_releaser：RM 优雅关释放自有进程占用（无需提权）") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  const std::wstring str_file{ntfscompact_test::temp_long_api_path(
+      ntfscompact_test::temp_sub(tmp_dir, L"held.bin"))};
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"held.bin", 8192));
+  const std::wstring str_hold_exe{hold_exe_path()};
+  REQUIRE(GetFileAttributesW(str_hold_exe.c_str()) != INVALID_FILE_ATTRIBUTES);
+  HoldChildPtr up_child{spawn_hold_child(str_hold_exe, str_file, false)};
+  REQUIRE(up_child);
+  REQUIRE(wait_file_occupied(str_file));
+
+  const auto xe_releaser{ntfscompact::make_real_releaser()};
+  REQUIRE(xe_releaser.has_value());
+  const ntfscompact::ReleaseOutcome ro_outcome{xe_releaser.value()(str_file)};
+
+  CHECK(ro_outcome.e_status == ntfscompact::ReleaseOutcome::Status::kReleased);
+  CHECK(ro_outcome.e_level == ntfscompact::ReleaseOutcome::Level::kRmGraceful);
+  CHECK_FALSE(closed_pid_name(ro_outcome.vec_closed, up_child->u4_pid).empty());
+  DWORD u4_code{0};
+  CHECK(wait_child_exit(up_child->h_process, 15000, u4_code));
+  CHECK(u4_code == 0);
+  CHECK_FALSE(ntfscompact::probe_file_occupied(str_file));
+}
+
+TEST_CASE("make_rm_force_level：假优雅失败注入升级后强制关可达") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  const std::wstring str_file{ntfscompact_test::temp_long_api_path(
+      ntfscompact_test::temp_sub(tmp_dir, L"held.bin"))};
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"held.bin", 8192));
+  const std::wstring str_hold_exe{hold_exe_path()};
+  REQUIRE(GetFileAttributesW(str_hold_exe.c_str()) != INVALID_FILE_ATTRIBUTES);
+  HoldChildPtr up_child{spawn_hold_child(str_hold_exe, str_file, false)};
+  REQUIRE(up_child);
+  REQUIRE(wait_file_occupied(str_file));
+
+  ntfscompact::ReleaseFn fn_fake_graceful{
+      [](const std::wstring&) {
+        ntfscompact::ReleaseOutcome ro_busy{};
+        ro_busy.e_status = ntfscompact::ReleaseOutcome::Status::kBusy;
+        ro_busy.e_level = ntfscompact::ReleaseOutcome::Level::kRmGraceful;
+        ro_busy.str_detail = L"RM 优雅关失败（模拟）";
+        return ro_busy;
+      }};
+  const auto xe_force{ntfscompact::make_rm_force_level()};
+  REQUIRE(xe_force.has_value());
+  const auto xe_chain{ntfscompact::make_escalating_releaser(
+      {std::move(fn_fake_graceful), std::move(xe_force).value()},
+      ntfscompact::EscalationBackoff{})};
+  REQUIRE(xe_chain.has_value());
+  const ntfscompact::ReleaseOutcome ro_outcome{xe_chain.value()(str_file)};
+
+  CHECK(ro_outcome.e_status == ntfscompact::ReleaseOutcome::Status::kReleased);
+  CHECK(ro_outcome.e_level == ntfscompact::ReleaseOutcome::Level::kRmForce);
+  CHECK_FALSE(closed_pid_name(ro_outcome.vec_closed, up_child->u4_pid).empty());
+  DWORD u4_code{0};
+  CHECK(wait_child_exit(up_child->h_process, 15000, u4_code));
+  CHECK(u4_code == 0);
+  CHECK_FALSE(ntfscompact::probe_file_occupied(str_file));
+}
+
+TEST_CASE("make_real_releaser：优雅关未生效自然升级强制关") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  const std::wstring str_file{ntfscompact_test::temp_long_api_path(
+      ntfscompact_test::temp_sub(tmp_dir, L"held.bin"))};
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"held.bin", 8192));
+  const std::wstring str_hold_exe{hold_exe_path()};
+  REQUIRE(GetFileAttributesW(str_hold_exe.c_str()) != INVALID_FILE_ATTRIBUTES);
+  HoldChildPtr up_child{spawn_hold_child(str_hold_exe, str_file, true)};
+  REQUIRE(up_child);
+  REQUIRE(wait_file_occupied(str_file));
+
+  const auto xe_releaser{ntfscompact::make_real_releaser()};
+  REQUIRE(xe_releaser.has_value());
+  const ntfscompact::ReleaseOutcome ro_outcome{xe_releaser.value()(str_file)};
+
+  CHECK(ro_outcome.e_status == ntfscompact::ReleaseOutcome::Status::kReleased);
+  CHECK(ro_outcome.e_level == ntfscompact::ReleaseOutcome::Level::kRmForce);
+  CHECK_FALSE(closed_pid_name(ro_outcome.vec_closed, up_child->u4_pid).empty());
+  DWORD u4_code{0};
+  CHECK(wait_child_exit(up_child->h_process, 40000, u4_code));
+  CHECK_FALSE(ntfscompact::probe_file_occupied(str_file));
 }
 
 TEST_CASE("make_real_releaser：假卸载注入与缺省真实卷卸载") {

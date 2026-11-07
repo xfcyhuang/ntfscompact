@@ -1,5 +1,7 @@
 #include "release.hpp"
 
+#include "wof_util.hpp"
+
 #include <windows.h>
 
 namespace ntfscompact {
@@ -134,6 +136,164 @@ ReleaseOutcome run_release_chain(const std::vector<ReleaseFn>& vec_levels,
   return ro_busy;
 }
 
+constexpr DWORD kRmForceShutdownFlag{0x1};
+constexpr DWORD kRmSessionKeyChars{32};
+
+struct RmUniqueProcess {
+  DWORD u4_pid{0};
+  FILETIME ft_start{};
+};
+
+struct RmProcessInfo {
+  RmUniqueProcess up_process{};
+  wchar_t arr_app_name[256]{};
+  wchar_t arr_service_name[64]{};
+  DWORD u4_app_type{0};
+  ULONG u4_app_status{0};
+  DWORD u4_ts_session_id{0};
+  BOOL b_restartable{FALSE};
+};
+
+using RmStartSessionPtr = DWORD(WINAPI*)(DWORD*, DWORD, wchar_t*);
+using RmRegisterResourcesPtr =
+    DWORD(WINAPI*)(DWORD, UINT, const wchar_t**, UINT, const RmUniqueProcess*,
+                   UINT, const wchar_t**);
+using RmGetListPtr = DWORD(WINAPI*)(DWORD, UINT*, UINT*, RmProcessInfo*, DWORD*);
+using RmStatusCallbackPtr = DWORD(WINAPI*)(DWORD);
+using RmShutdownPtr = DWORD(WINAPI*)(DWORD, ULONG, RmStatusCallbackPtr);
+using RmEndSessionPtr = DWORD(WINAPI*)(DWORD);
+
+struct RmContext {
+  HmoduleGuard guard_module{};
+  RmStartSessionPtr fn_start{nullptr};
+  RmRegisterResourcesPtr fn_register{nullptr};
+  RmGetListPtr fn_get_list{nullptr};
+  RmShutdownPtr fn_shutdown{nullptr};
+  RmEndSessionPtr fn_end{nullptr};
+};
+
+std::expected<RmContext, std::wstring> make_rm_context() {
+  HMODULE h_module{LoadLibraryW(L"rstrtmgr.dll")};
+  if (h_module == nullptr) {
+    return std::unexpected(std::format(
+        L"无法加载 rstrtmgr.dll（错误码 {}）：占用释放不可用，工具终止",
+        GetLastError()));
+  }
+  RmContext ctx_rm{};
+  ctx_rm.guard_module = HmoduleGuard{h_module};
+  ctx_rm.fn_start =
+      reinterpret_cast<RmStartSessionPtr>(GetProcAddress(h_module, "RmStartSession"));
+  ctx_rm.fn_register = reinterpret_cast<RmRegisterResourcesPtr>(
+      GetProcAddress(h_module, "RmRegisterResources"));
+  ctx_rm.fn_get_list =
+      reinterpret_cast<RmGetListPtr>(GetProcAddress(h_module, "RmGetList"));
+  ctx_rm.fn_shutdown =
+      reinterpret_cast<RmShutdownPtr>(GetProcAddress(h_module, "RmShutdown"));
+  ctx_rm.fn_end =
+      reinterpret_cast<RmEndSessionPtr>(GetProcAddress(h_module, "RmEndSession"));
+  if (ctx_rm.fn_start == nullptr || ctx_rm.fn_register == nullptr ||
+      ctx_rm.fn_get_list == nullptr || ctx_rm.fn_shutdown == nullptr ||
+      ctx_rm.fn_end == nullptr) {
+    return std::unexpected(std::format(
+        L"rstrtmgr.dll 缺少 Restart Manager 导出（错误码 {}）", GetLastError()));
+  }
+  return ctx_rm;
+}
+
+std::vector<ClosedProcess> listed_processes(
+    const std::vector<RmProcessInfo>& vec_apps, UINT u4_count) {
+  std::vector<ClosedProcess> vec_closed{};
+  for (UINT u4_index{0}; u4_index < u4_count && u4_index < vec_apps.size();
+       ++u4_index) {
+    ClosedProcess cp_item{};
+    cp_item.u4_pid = vec_apps[u4_index].up_process.u4_pid;
+    cp_item.str_name = vec_apps[u4_index].arr_app_name;
+    if (cp_item.str_name.empty()) {
+      cp_item.str_name = L"未知进程";
+    }
+    vec_closed.push_back(std::move(cp_item));
+  }
+  return vec_closed;
+}
+
+ReleaseOutcome rm_shutdown_level(const RmContext& ctx_rm, bool b_force,
+                                 const std::wstring& str_long_path) {
+  const wchar_t* ptr_level_name{b_force ? L"RM 强制关" : L"RM 优雅关"};
+  const ReleaseOutcome::Level e_level{b_force
+                                          ? ReleaseOutcome::Level::kRmForce
+                                          : ReleaseOutcome::Level::kRmGraceful};
+  ReleaseOutcome ro_busy{};
+  ro_busy.e_status = ReleaseOutcome::Status::kBusy;
+  ro_busy.e_level = e_level;
+  DWORD u4_session{0};
+  wchar_t arr_key[kRmSessionKeyChars + 1]{};
+  DWORD u4_err{ctx_rm.fn_start(&u4_session, 0, arr_key)};
+  if (u4_err != ERROR_SUCCESS) {
+    ro_busy.str_detail =
+        std::format(L"{}会话启动失败（错误码 {}）", ptr_level_name, u4_err);
+    return ro_busy;
+  }
+  const wchar_t* arr_paths[1]{str_long_path.c_str()};
+  u4_err = ctx_rm.fn_register(u4_session, 1, arr_paths, 0, nullptr, 0, nullptr);
+  if (u4_err != ERROR_SUCCESS) {
+    ctx_rm.fn_end(u4_session);
+    ro_busy.str_detail =
+        std::format(L"{}资源注册失败（错误码 {}）", ptr_level_name, u4_err);
+    return ro_busy;
+  }
+  UINT u4_needed{0};
+  UINT u4_count{0};
+  DWORD u4_reboot_reasons{0};
+  u4_err = ctx_rm.fn_get_list(u4_session, &u4_needed, &u4_count, nullptr,
+                              &u4_reboot_reasons);
+  std::vector<RmProcessInfo> vec_apps{};
+  if (u4_err == ERROR_MORE_DATA && u4_needed > 0) {
+    vec_apps.resize(u4_needed);
+    std::vector<DWORD> vec_reasons(u4_needed, 0);
+    u4_count = u4_needed;
+    u4_err = ctx_rm.fn_get_list(u4_session, &u4_needed, &u4_count,
+                                vec_apps.data(), vec_reasons.data());
+  }
+  if (u4_err != ERROR_SUCCESS) {
+    ctx_rm.fn_end(u4_session);
+    ro_busy.str_detail =
+        std::format(L"{}占用进程列举失败（错误码 {}）", ptr_level_name, u4_err);
+    return ro_busy;
+  }
+  if (u4_count == 0) {
+    ctx_rm.fn_end(u4_session);
+    ro_busy.str_detail = std::format(L"{}未列举到占用进程", ptr_level_name);
+    return ro_busy;
+  }
+  u4_err = ctx_rm.fn_shutdown(
+      u4_session, b_force ? kRmForceShutdownFlag : 0,
+      static_cast<RmStatusCallbackPtr>(nullptr));
+  const std::vector<ClosedProcess> vec_closed{listed_processes(vec_apps, u4_count)};
+  ctx_rm.fn_end(u4_session);
+  if (u4_err != ERROR_SUCCESS) {
+    ro_busy.str_detail =
+        std::format(L"{}失败（错误码 {}）", ptr_level_name, u4_err);
+    return ro_busy;
+  }
+  if (probe_file_occupied(str_long_path)) {
+    ro_busy.str_detail = std::format(L"{}未生效，文件仍被占用", ptr_level_name);
+    return ro_busy;
+  }
+  ReleaseOutcome ro_released{};
+  ro_released.e_status = ReleaseOutcome::Status::kReleased;
+  ro_released.e_level = e_level;
+  ro_released.vec_closed = vec_closed;
+  ro_released.str_detail = std::format(L"经{}释放", ptr_level_name);
+  return ro_released;
+}
+
+ReleaseFn make_rm_shutdown_level(std::shared_ptr<const RmContext> sp_ctx,
+                                 bool b_force) {
+  return [sp_ctx, b_force](const std::wstring& str_long_path) {
+    return rm_shutdown_level(*sp_ctx, b_force, str_long_path);
+  };
+}
+
 }
 
 std::wstring level_display_name(ReleaseOutcome::Level e_level) {
@@ -196,8 +356,35 @@ std::expected<ReleaseFn, std::wstring> make_real_releaser(
   }};
 }
 
+std::expected<ReleaseFn, std::wstring> make_rm_shutdown_level(bool b_force) {
+  auto xe_ctx{make_rm_context()};
+  if (!xe_ctx.has_value()) {
+    return std::unexpected(std::move(xe_ctx).error());
+  }
+  const auto sp_ctx{std::make_shared<const RmContext>(std::move(xe_ctx).value())};
+  return make_rm_shutdown_level(sp_ctx, b_force);
+}
+
+std::expected<ReleaseFn, std::wstring> make_rm_graceful_level() {
+  return make_rm_shutdown_level(false);
+}
+
+std::expected<ReleaseFn, std::wstring> make_rm_force_level() {
+  return make_rm_shutdown_level(true);
+}
+
 std::expected<ReleaseFn, std::wstring> make_real_releaser() {
-  return make_real_releaser(&dismount_volume_for);
+  auto xe_graceful{make_rm_graceful_level()};
+  if (!xe_graceful.has_value()) {
+    return xe_graceful;
+  }
+  auto xe_force{make_rm_force_level()};
+  if (!xe_force.has_value()) {
+    return xe_force;
+  }
+  return make_escalating_releaser(
+      {std::move(xe_graceful).value(), std::move(xe_force).value()},
+      EscalationBackoff{});
 }
 
 }
