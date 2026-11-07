@@ -142,6 +142,17 @@ ntfscompact::ReleaseFn make_busy_releaser(std::vector<std::wstring>& vec_calls) 
   };
 }
 
+struct DetectRecorder {
+  std::vector<std::wstring> vec_calls{};
+};
+
+DetectFn make_record_detector(DetectRecorder& rec_record) {
+  return [&rec_record](const std::wstring& str_long_path) {
+    rec_record.vec_calls.push_back(str_long_path);
+    return fake_detect(str_long_path);
+  };
+}
+
 std::wstring make_fixture(ntfscompact_test::TempDir& tmp_dir) {
   REQUIRE(tmp_dir->b_ok);
   REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"plain.bin", 8192));
@@ -1269,4 +1280,79 @@ TEST_CASE("run_pipeline：解压模式同样清除目录标记") {
   CHECK(contains(str_text, L"；已清除目录标记 1 个"));
   REQUIRE(vec_uncompress_calls.size() == 1);
   CHECK(contains(str_text, L"woflzx.bin：已解压"));
+}
+
+TEST_CASE("run_pipeline：检测下沉——目录标记清除先于首次检测") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  REQUIRE(ntfscompact_test::temp_make_dir(tmp_dir, L"one"));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"one\\plain.bin", 8192));
+  REQUIRE(ntfscompact_test::mark_dir(ntfscompact_test::temp_sub(tmp_dir, L"one")));
+
+  Options opt_case{compress_options()};
+  opt_case.vec_paths.push_back(ntfscompact_test::temp_path(tmp_dir));
+  DetectRecorder rec_detect{};
+  std::vector<std::wstring> vec_events{};
+  const DetectFn fn_detect{
+      [&rec_detect, &vec_events](const std::wstring& str_long_path) {
+        vec_events.push_back(L"detect:" + str_long_path);
+        rec_detect.vec_calls.push_back(str_long_path);
+        return fake_detect(str_long_path);
+      }};
+  const DirFlagFn fn_dir_flag{
+      [&vec_events](const std::wstring& str_long_path)
+          -> std::expected<void, std::wstring> {
+        vec_events.push_back(L"clear:" + str_long_path);
+        return {};
+      }};
+  ExecuteRecorder recorder{};
+
+  std::FILE* f_out{std::tmpfile()};
+  std::FILE* f_err{std::tmpfile()};
+  REQUIRE(f_out != nullptr);
+  REQUIRE(f_err != nullptr);
+  const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
+                                UncompressFn{}, ReleaseFn{}, fn_dir_flag, f_out, f_err)};
+  std::fclose(f_out);
+  std::fclose(f_err);
+
+  CHECK(i4_code == 0);
+  REQUIRE(rec_detect.vec_calls.size() == 1);
+  std::size_t u8_first_detect{vec_events.size()};
+  std::size_t u8_last_clear{0};
+  for (std::size_t u8_index{0}; u8_index < vec_events.size(); ++u8_index) {
+    if (vec_events[u8_index].rfind(L"detect:", 0) == 0) {
+      u8_first_detect = std::min(u8_first_detect, u8_index);
+    }
+    if (vec_events[u8_index].rfind(L"clear:", 0) == 0) {
+      u8_last_clear = std::max(u8_last_clear, u8_index);
+    }
+  }
+  CHECK(u8_last_clear < u8_first_detect);
+}
+
+TEST_CASE("run_pipeline：检测守恒——每候选文件恰一次检测，扫描跳过零检测") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  const std::wstring str_dir{make_fixture(tmp_dir)};
+
+  Options opt_case{compress_options()};
+  opt_case.b_dry_run = true;
+  opt_case.vec_paths.push_back(str_dir);
+  DetectRecorder rec_detect{};
+  const DetectFn fn_detect{make_record_detector(rec_detect)};
+  ExecuteRecorder recorder{};
+
+  std::FILE* f_out{std::tmpfile()};
+  REQUIRE(f_out != nullptr);
+  const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
+                                UncompressFn{}, ReleaseFn{}, DirFlagFn{}, f_out, f_out)};
+  std::fclose(f_out);
+
+  CHECK(i4_code == 1);
+  REQUIRE(rec_detect.vec_calls.size() == 7);
+  bool b_has_tiny{false};
+  for (const std::wstring& str_call : rec_detect.vec_calls) {
+    b_has_tiny = b_has_tiny || contains(str_call, L"tiny.bin");
+  }
+  CHECK_FALSE(b_has_tiny);
 }
