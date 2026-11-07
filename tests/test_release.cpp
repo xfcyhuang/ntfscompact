@@ -714,6 +714,30 @@ TEST_CASE("make_handle_force_level：自身 PID 句柄被过滤不强关自己")
   CHECK(ro_outcome.e_status == ntfscompact::ReleaseOutcome::Status::kBusy);
 }
 
+TEST_CASE("make_oplock_level：独占持有者不参与 oplock 协议，快速降级不拖预算") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  const std::wstring str_file{ntfscompact_test::temp_long_api_path(
+      ntfscompact_test::temp_sub(tmp_dir, L"held.bin"))};
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"held.bin", 8192));
+  const std::wstring str_hold_exe{hold_exe_path()};
+  REQUIRE(GetFileAttributesW(str_hold_exe.c_str()) != INVALID_FILE_ATTRIBUTES);
+  HoldChildPtr up_child{spawn_hold_child(str_hold_exe, str_file, false)};
+  REQUIRE(up_child);
+  REQUIRE(wait_file_occupied(str_file));
+
+  const std::uint64_t u8_start_ms{GetTickCount64()};
+  const auto fn_level{ntfscompact::make_oplock_level(2000)};
+  const ntfscompact::ReleaseOutcome ro_outcome{fn_level(str_file)};
+  const std::uint64_t u8_elapsed_ms{GetTickCount64() - u8_start_ms};
+
+  CHECK(ro_outcome.e_status == ntfscompact::ReleaseOutcome::Status::kBusy);
+  CHECK(ro_outcome.e_level == ntfscompact::ReleaseOutcome::Level::kOplock);
+  CHECK(ro_outcome.vec_closed.empty());
+  CHECK(ro_outcome.str_detail.find(L"oplock") != std::wstring::npos);
+  CHECK(u8_elapsed_ms < 1500);
+}
+
 TEST_CASE("run_pipeline：注入假释放后压缩继续") {
   ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
   REQUIRE(tmp_dir->b_ok);

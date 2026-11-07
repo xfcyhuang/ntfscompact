@@ -625,6 +625,27 @@ ReleaseFn make_rm_shutdown_level(std::shared_ptr<const RmContext> sp_ctx,
 
 }
 
+ReleaseFn make_oplock_level(std::uint32_t u4_wait_timeout_ms) {
+  return [u4_wait_timeout_ms](const std::wstring& str_long_path)
+             -> ReleaseOutcome {
+    ReleaseOutcome ro_busy{};
+    ro_busy.e_status = ReleaseOutcome::Status::kBusy;
+    ro_busy.e_level = ReleaseOutcome::Level::kOplock;
+    HANDLE h_file{CreateFileW(
+        str_long_path.c_str(), GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr)};
+    if (h_file == INVALID_HANDLE_VALUE) {
+      ro_busy.str_detail = std::format(
+          L"oplock 协商打不开目标文件（错误码 {}），立即降级", GetLastError());
+      return ro_busy;
+    }
+    HandlePtr up_file{h_file};
+    ro_busy.str_detail = L"oplock 协商未完成，降级";
+    return ro_busy;
+  };
+}
+
 std::wstring level_display_name(ReleaseOutcome::Level e_level) {
   switch (e_level) {
     case ReleaseOutcome::Level::kOplock:
