@@ -215,6 +215,8 @@ int run_pipeline(const Options& opt_options, const DetectFn& fn_detect,
               ReleaseGate gate_retry{
                   gate_release(fr_report.str_long_path, fn_release)};
               if (gate_retry.b_busy) {
+                append_released(fr_report.vec_released,
+                                gate_retry.vec_released);
                 mark_busy_skip(fr_report, gate_retry.str_busy_reason);
               } else {
                 append_released(fr_report.vec_released,
@@ -234,6 +236,7 @@ int run_pipeline(const Options& opt_options, const DetectFn& fn_detect,
               }
             }
           } else {
+            append_released(fr_report.vec_released, gate_ensure.vec_released);
             mark_busy_skip(fr_report, gate_ensure.str_busy_reason);
           }
           if (fr_report.b_executed &&
@@ -257,6 +260,7 @@ int run_pipeline(const Options& opt_options, const DetectFn& fn_detect,
           ReleaseGate gate_ensure{
               ensure_released(fr_report.str_long_path, fn_release)};
           if (gate_ensure.b_busy) {
+            append_released(fr_report.vec_released, gate_ensure.vec_released);
             mark_busy_skip(fr_report, gate_ensure.str_busy_reason);
             break;
           }

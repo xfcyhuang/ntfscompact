@@ -785,6 +785,45 @@ TEST_CASE("run_pipeline：占用不可释放计跳过不计失败") {
   CHECK(contains(str_text, L"共 2 个文件：压缩 1、重压 0、解压 0、跳过 1"));
 }
 
+TEST_CASE("run_pipeline：链尽跳过仍默认输出已关进程审计") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"plain.bin", 8192));
+  TestFileLock lock_file{
+      lock_test_file(ntfscompact_test::temp_long_api_path(
+          ntfscompact_test::temp_sub(tmp_dir, L"plain.bin")))};
+  REQUIRE(lock_file);
+
+  Options opt_case{compress_options()};
+  opt_case.vec_paths.push_back(ntfscompact_test::temp_path(tmp_dir));
+  const DetectFn fn_detect{fake_detect};
+  ExecuteRecorder recorder{};
+  const ReleaseFn fn_partial_release{
+      [](const std::wstring&) {
+        ntfscompact::ReleaseOutcome ro_busy{};
+        ro_busy.e_status = ntfscompact::ReleaseOutcome::Status::kBusy;
+        ro_busy.e_level = ntfscompact::ReleaseOutcome::Level::kRmForce;
+        ro_busy.vec_closed = {{777, L"stuck.exe"}};
+        ro_busy.str_detail = L"占用不可释放：升级链尽后仍被占用";
+        return ro_busy;
+      }};
+
+  std::FILE* f_out{std::tmpfile()};
+  REQUIRE(f_out != nullptr);
+  const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
+                                UncompressFn{}, fn_partial_release, DirFlagFn{},
+                                f_out, f_out)};
+  const std::wstring str_text{read_all(f_out)};
+  std::fclose(f_out);
+
+  CHECK(i4_code == 0);
+  CHECK(recorder.vec_calls.empty());
+  CHECK(contains(str_text, L"[跳过] "));
+  CHECK(contains(str_text, L"plain.bin：占用不可释放：升级链尽后仍被占用"));
+  CHECK(contains(str_text, L"；升级释放：RM 强制关（stuck.exe PID 777）"));
+  CHECK(contains(str_text, L"共 1 个文件：压缩 0、重压 0、解压 0、跳过 1"));
+}
+
 TEST_CASE("run_pipeline：执行器报 32 时先升级释放再重试一次") {
   ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
   REQUIRE(tmp_dir->b_ok);
