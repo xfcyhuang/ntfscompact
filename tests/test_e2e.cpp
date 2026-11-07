@@ -2,6 +2,7 @@
 #include "doctest.h"
 
 #include "detect.hpp"
+#include "release.hpp"
 #include "temp_dir.hpp"
 #include "util.hpp"
 
@@ -205,6 +206,116 @@ bool deny_dir_write_data(const std::wstring& str_dir) {
 void restore_dir_acl(const std::wstring& str_dir) {
   const std::wstring str_cmd{L"icacls \"" + str_dir + L"\" /reset >nul 2>&1"};
   _wsystem(str_cmd.c_str());
+}
+
+struct HoldChild {
+  HANDLE h_process{INVALID_HANDLE_VALUE};
+  HANDLE h_thread{INVALID_HANDLE_VALUE};
+  DWORD u4_pid{0};
+};
+
+struct HoldChildReleaser {
+  void operator()(HoldChild* ptr_child) const {
+    if (ptr_child == nullptr) {
+      return;
+    }
+    if (ptr_child->h_process != INVALID_HANDLE_VALUE) {
+      if (WaitForSingleObject(ptr_child->h_process, 0) == WAIT_TIMEOUT) {
+        TerminateProcess(ptr_child->h_process, 1);
+        WaitForSingleObject(ptr_child->h_process, 5000);
+      }
+      CloseHandle(ptr_child->h_process);
+    }
+    if (ptr_child->h_thread != INVALID_HANDLE_VALUE) {
+      CloseHandle(ptr_child->h_thread);
+    }
+    delete ptr_child;
+  }
+};
+
+using HoldChildPtr = std::unique_ptr<HoldChild, HoldChildReleaser>;
+
+std::wstring hold_exe_path() {
+  wchar_t arr_module[MAX_PATH]{};
+  const DWORD u4_len{GetModuleFileNameW(nullptr, arr_module, MAX_PATH)};
+  const std::wstring str_module{arr_module, u4_len};
+  const std::size_t u8_slash{str_module.find_last_of(L"\\")};
+  return str_module.substr(0, u8_slash) + L"\\ntfscompact_hold.exe";
+}
+
+HoldChildPtr spawn_hold(const std::wstring& str_hold_exe,
+                        const std::wstring& str_file, bool b_stubborn) {
+  std::wstring str_cmd{L"\"" + str_hold_exe + L"\" \"" + str_file + L"\""};
+  if (b_stubborn) {
+    str_cmd += L" --stubborn";
+  }
+  STARTUPINFOW si_start{};
+  si_start.cb = sizeof(si_start);
+  PROCESS_INFORMATION pi_process{};
+  const BOOL b_ok{CreateProcessW(str_hold_exe.c_str(), str_cmd.data(), nullptr,
+                                 nullptr, FALSE, 0, nullptr, nullptr,
+                                 &si_start, &pi_process)};
+  if (b_ok == FALSE) {
+    return HoldChildPtr{};
+  }
+  HoldChildPtr up_child{new HoldChild{}};
+  up_child->h_process = pi_process.hProcess;
+  up_child->h_thread = pi_process.hThread;
+  up_child->u4_pid = pi_process.dwProcessId;
+  return up_child;
+}
+
+bool child_is_alive(const HoldChildPtr& up_child) {
+  return WaitForSingleObject(up_child->h_process, 0) == WAIT_TIMEOUT;
+}
+
+bool wait_file_occupied(const std::wstring& str_long_path) {
+  for (int i4_attempt{0}; i4_attempt < 100; ++i4_attempt) {
+    if (ntfscompact::probe_file_occupied(str_long_path)) {
+      return true;
+    }
+    Sleep(50);
+  }
+  return false;
+}
+
+bool wait_child_exit(const HoldChildPtr& up_child, DWORD u4_timeout_ms,
+                     DWORD& u4_code) {
+  if (WaitForSingleObject(up_child->h_process, u4_timeout_ms) !=
+      WAIT_OBJECT_0) {
+    return false;
+  }
+  return GetExitCodeProcess(up_child->h_process, &u4_code) != FALSE;
+}
+
+std::wstring lowercase_text(std::wstring str_text) {
+  for (wchar_t& ch_wide : str_text) {
+    ch_wide = static_cast<wchar_t>(std::towlower(ch_wide));
+  }
+  return str_text;
+}
+
+bool make_deep_dir(std::wstring& str_deep) {
+  int i4_level{0};
+  while (ntfscompact_test::temp_long_api_path(str_deep).size() <= 310) {
+    if (i4_level >= 100) {
+      return false;
+    }
+    str_deep += std::format(L"\\lvl{:03}", i4_level);
+    if (CreateDirectoryW(
+            ntfscompact_test::temp_long_api_path(str_deep).c_str(),
+            nullptr) == FALSE) {
+      return false;
+    }
+    ++i4_level;
+  }
+  return ntfscompact_test::temp_long_api_path(str_deep).size() > 310;
+}
+
+std::wstring hold_audit_needle(const wchar_t* ptr_level, DWORD u4_pid) {
+  return lowercase_text(std::wstring{L"；升级释放："} + ptr_level +
+                        L"（ntfscompact_hold.exe pid " +
+                        std::to_wstring(u4_pid) + L"）");
 }
 
 }
@@ -463,6 +574,230 @@ TEST_CASE("e2e_flow：目录压缩标记——干跑列出、实跑清除、-q �
   CHECK(has_text(run_fail.str_out, L"plain.bin：已压缩为指定算法 xpress8k"));
   CHECK(has_text(run_fail.str_out, L"；失败 1"));
   CHECK(dir_is_marked(str_locked));
+}
+
+TEST_CASE("e2e_release：占用经链释放后压缩成功且审计行正确（RM 优雅关）") {
+  const std::wstring str_hold_exe{hold_exe_path()};
+  REQUIRE(GetFileAttributesW(str_hold_exe.c_str()) != INVALID_FILE_ATTRIBUTES);
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  const std::wstring str_busy{ntfscompact_test::temp_sub(tmp_dir, L"busy.bin")};
+  const std::wstring str_free{ntfscompact_test::temp_sub(tmp_dir, L"free.bin")};
+  REQUIRE(write_compressible(str_busy) > 0);
+  REQUIRE(write_compressible(str_free) > 0);
+  HoldChildPtr up_child{spawn_hold(str_hold_exe, str_busy, false)};
+  REQUIRE(up_child);
+  REQUIRE(wait_file_occupied(ntfscompact_test::temp_long_api_path(str_busy)));
+
+  ToolRun run_compress{};
+  REQUIRE(run_tool(L"\"" + ntfscompact_test::temp_path(tmp_dir) + L"\"",
+                   run_compress));
+  REQUIRE_MESSAGE(run_compress.i4_code == 0,
+                  narrow(run_compress.str_out + run_compress.str_err));
+  CHECK(has_text(run_compress.str_out,
+                 L"[压缩] " + str_busy + L"：已压缩为指定算法 xpress8k"));
+  CHECK(has_text(lowercase_text(run_compress.str_out),
+                 hold_audit_needle(L"RM 优雅关", up_child->u4_pid)));
+  CHECK(has_text(run_compress.str_out,
+                 L"[压缩] " + str_free + L"：已压缩为指定算法 xpress8k"));
+  CHECK(has_text(run_compress.str_out,
+                 L"共 2 个文件：压缩 2、重压 0、解压 0、跳过 0"));
+  DWORD u4_code{0};
+  REQUIRE(wait_child_exit(up_child, 15000, u4_code));
+  CHECK(u4_code == 0);
+  CHECK_FALSE(ntfscompact::probe_file_occupied(
+      ntfscompact_test::temp_long_api_path(str_busy)));
+}
+
+TEST_CASE("e2e_release：--stubborn 顽固占用升级至 RM 强制关后压缩成功") {
+  const std::wstring str_hold_exe{hold_exe_path()};
+  REQUIRE(GetFileAttributesW(str_hold_exe.c_str()) != INVALID_FILE_ATTRIBUTES);
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  const std::wstring str_busy{ntfscompact_test::temp_sub(tmp_dir, L"busy.bin")};
+  const std::wstring str_free{ntfscompact_test::temp_sub(tmp_dir, L"free.bin")};
+  REQUIRE(write_compressible(str_busy) > 0);
+  REQUIRE(write_compressible(str_free) > 0);
+  HoldChildPtr up_child{spawn_hold(str_hold_exe, str_busy, true)};
+  REQUIRE(up_child);
+  REQUIRE(wait_file_occupied(ntfscompact_test::temp_long_api_path(str_busy)));
+
+  ToolRun run_compress{};
+  REQUIRE(run_tool(L"\"" + ntfscompact_test::temp_path(tmp_dir) + L"\"",
+                   run_compress));
+  REQUIRE_MESSAGE(run_compress.i4_code == 0,
+                  narrow(run_compress.str_out + run_compress.str_err));
+  CHECK(has_text(run_compress.str_out,
+                 L"[压缩] " + str_busy + L"：已压缩为指定算法 xpress8k"));
+  CHECK(has_text(lowercase_text(run_compress.str_out),
+                 hold_audit_needle(L"RM 强制关", up_child->u4_pid)));
+  CHECK(has_text(run_compress.str_out,
+                 L"共 2 个文件：压缩 2、重压 0、解压 0、跳过 0"));
+  DWORD u4_code{0};
+  CHECK(wait_child_exit(up_child, 30000, u4_code));
+  CHECK_FALSE(ntfscompact::probe_file_occupied(
+      ntfscompact_test::temp_long_api_path(str_busy)));
+}
+
+TEST_CASE("e2e_release：-q 下释放运行仅剩汇总行且退出码不变") {
+  const std::wstring str_hold_exe{hold_exe_path()};
+  REQUIRE(GetFileAttributesW(str_hold_exe.c_str()) != INVALID_FILE_ATTRIBUTES);
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  const std::wstring str_busy{ntfscompact_test::temp_sub(tmp_dir, L"busy.bin")};
+  const std::wstring str_free{ntfscompact_test::temp_sub(tmp_dir, L"free.bin")};
+  REQUIRE(write_compressible(str_busy) > 0);
+  REQUIRE(write_compressible(str_free) > 0);
+  HoldChildPtr up_child{spawn_hold(str_hold_exe, str_busy, false)};
+  REQUIRE(up_child);
+  REQUIRE(wait_file_occupied(ntfscompact_test::temp_long_api_path(str_busy)));
+
+  ToolRun run_quiet{};
+  REQUIRE(run_tool(L"-q \"" + ntfscompact_test::temp_path(tmp_dir) + L"\"",
+                   run_quiet));
+  REQUIRE_MESSAGE(run_quiet.i4_code == 0,
+                  narrow(run_quiet.str_out + run_quiet.str_err));
+  CHECK(run_quiet.str_out.find(L'\n') == run_quiet.str_out.rfind(L'\n'));
+  CHECK(has_text(run_quiet.str_out,
+                 L"共 2 个文件：压缩 2、重压 0、解压 0、跳过 0"));
+  CHECK(has_text(run_quiet.str_out, L"；压缩/重压 "));
+  CHECK_FALSE(has_text(run_quiet.str_out, L"升级释放"));
+  CHECK_FALSE(has_text(run_quiet.str_out, L"["));
+  CHECK(run_quiet.str_err.empty());
+  DWORD u4_code{0};
+  REQUIRE(wait_child_exit(up_child, 15000, u4_code));
+  CHECK(u4_code == 0);
+}
+
+TEST_CASE("e2e_release：链尽跳过——非提权如实止步不终结占用进程，其余文件继续") {
+  const std::wstring str_hold_exe{hold_exe_path()};
+  REQUIRE(GetFileAttributesW(str_hold_exe.c_str()) != INVALID_FILE_ATTRIBUTES);
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  std::wstring str_deep{ntfscompact_test::temp_path(tmp_dir)};
+  REQUIRE(make_deep_dir(str_deep));
+  str_deep += L"\\long.bin";
+  REQUIRE(write_compressible(str_deep) > 0);
+  const std::wstring str_free{ntfscompact_test::temp_sub(tmp_dir, L"free.bin")};
+  REQUIRE(write_compressible(str_free) > 0);
+  const std::wstring str_deep_long{
+      ntfscompact_test::temp_long_api_path(str_deep)};
+  HoldChildPtr up_child{spawn_hold(str_hold_exe, str_deep_long, true)};
+  REQUIRE(up_child);
+  REQUIRE(wait_file_occupied(str_deep_long));
+
+  ToolRun run_compress{};
+  REQUIRE(run_tool(L"\"" + str_deep_long + L"\" \"" +
+                       ntfscompact_test::temp_long_api_path(str_free) + L"\"",
+                   run_compress));
+  if (ntfscompact::process_is_elevated()) {
+    REQUIRE_MESSAGE(run_compress.i4_code == 0,
+                    narrow(run_compress.str_out + run_compress.str_err));
+    CHECK(has_text(run_compress.str_out,
+                   L"[压缩] " + str_deep + L"：已压缩为指定算法 xpress8k"));
+    CHECK(has_text(lowercase_text(run_compress.str_out),
+                   hold_audit_needle(L"句柄强关", up_child->u4_pid)));
+    CHECK(has_text(run_compress.str_out,
+                   L"共 2 个文件：压缩 2、重压 0、解压 0、跳过 0"));
+    CHECK_FALSE(ntfscompact::probe_file_occupied(str_deep_long));
+    CHECK(child_is_alive(up_child));
+  } else {
+    REQUIRE_MESSAGE(run_compress.i4_code == 0,
+                    narrow(run_compress.str_out + run_compress.str_err));
+    CHECK(has_text(run_compress.str_out,
+                   L"[跳过] " + str_deep +
+                       L"：占用不可释放：升级链尽后仍被占用（句柄强关需管理员权限"));
+    CHECK(has_text(run_compress.str_out,
+                   L"[压缩] " + str_free + L"：已压缩为指定算法 xpress8k"));
+    CHECK(has_text(run_compress.str_out,
+                   L"共 2 个文件：压缩 1、重压 0、解压 0、跳过 1"));
+    CHECK_FALSE(has_text(run_compress.str_out, L"升级释放"));
+    CHECK(ntfscompact::probe_file_occupied(str_deep_long));
+    CHECK(child_is_alive(up_child));
+  }
+}
+
+TEST_CASE("e2e_release：-q 下链尽跳过行被抑制且退出码不变") {
+  const std::wstring str_hold_exe{hold_exe_path()};
+  REQUIRE(GetFileAttributesW(str_hold_exe.c_str()) != INVALID_FILE_ATTRIBUTES);
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  std::wstring str_deep{ntfscompact_test::temp_path(tmp_dir)};
+  REQUIRE(make_deep_dir(str_deep));
+  str_deep += L"\\long.bin";
+  REQUIRE(write_compressible(str_deep) > 0);
+  const std::wstring str_free{ntfscompact_test::temp_sub(tmp_dir, L"free.bin")};
+  REQUIRE(write_compressible(str_free) > 0);
+  const std::wstring str_deep_long{
+      ntfscompact_test::temp_long_api_path(str_deep)};
+  HoldChildPtr up_child{spawn_hold(str_hold_exe, str_deep_long, true)};
+  REQUIRE(up_child);
+  REQUIRE(wait_file_occupied(str_deep_long));
+
+  ToolRun run_quiet{};
+  REQUIRE(run_tool(L"-q \"" + str_deep_long + L"\" \"" +
+                       ntfscompact_test::temp_long_api_path(str_free) + L"\"",
+                   run_quiet));
+  REQUIRE_MESSAGE(run_quiet.i4_code == 0,
+                  narrow(run_quiet.str_out + run_quiet.str_err));
+  CHECK(run_quiet.str_out.find(L'\n') == run_quiet.str_out.rfind(L'\n'));
+  CHECK(has_text(run_quiet.str_out,
+                 L"共 2 个文件：压缩 1、重压 0、解压 0、跳过 1"));
+  CHECK_FALSE(has_text(run_quiet.str_out, L"升级链尽"));
+  CHECK_FALSE(has_text(run_quiet.str_out, L"升级释放"));
+  CHECK_FALSE(has_text(run_quiet.str_out, L"["));
+  CHECK(run_quiet.str_err.empty());
+  if (!ntfscompact::process_is_elevated()) {
+    CHECK(ntfscompact::probe_file_occupied(str_deep_long));
+    CHECK(child_is_alive(up_child));
+  }
+}
+
+TEST_CASE("e2e_release：--force-close-all 走全链——非提权如实止步，提权句柄级可达") {
+  const std::wstring str_hold_exe{hold_exe_path()};
+  REQUIRE(GetFileAttributesW(str_hold_exe.c_str()) != INVALID_FILE_ATTRIBUTES);
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  std::wstring str_deep{ntfscompact_test::temp_path(tmp_dir)};
+  REQUIRE(make_deep_dir(str_deep));
+  str_deep += L"\\long.bin";
+  REQUIRE(write_compressible(str_deep) > 0);
+  const std::wstring str_free{ntfscompact_test::temp_sub(tmp_dir, L"free.bin")};
+  REQUIRE(write_compressible(str_free) > 0);
+  const std::wstring str_deep_long{
+      ntfscompact_test::temp_long_api_path(str_deep)};
+  HoldChildPtr up_child{spawn_hold(str_hold_exe, str_deep_long, true)};
+  REQUIRE(up_child);
+  REQUIRE(wait_file_occupied(str_deep_long));
+
+  ToolRun run_force{};
+  REQUIRE(run_tool(L"--force-close-all \"" + str_deep_long + L"\" \"" +
+                       ntfscompact_test::temp_long_api_path(str_free) + L"\"",
+                   run_force));
+  if (ntfscompact::process_is_elevated()) {
+    REQUIRE_MESSAGE(run_force.i4_code == 0,
+                    narrow(run_force.str_out + run_force.str_err));
+    CHECK(has_text(run_force.str_out,
+                   L"[压缩] " + str_deep + L"：已压缩为指定算法 xpress8k"));
+    CHECK(has_text(lowercase_text(run_force.str_out),
+                   hold_audit_needle(L"句柄强关", up_child->u4_pid)));
+    CHECK(has_text(run_force.str_out,
+                   L"共 2 个文件：压缩 2、重压 0、解压 0、跳过 0"));
+    CHECK_FALSE(ntfscompact::probe_file_occupied(str_deep_long));
+    CHECK(child_is_alive(up_child));
+  } else {
+    REQUIRE_MESSAGE(run_force.i4_code == 0,
+                    narrow(run_force.str_out + run_force.str_err));
+    CHECK(has_text(run_force.str_out,
+                   L"[跳过] " + str_deep +
+                       L"：占用不可释放：升级链尽后仍被占用（句柄强关需管理员权限"));
+    CHECK(has_text(run_force.str_out,
+                   L"[压缩] " + str_free + L"：已压缩为指定算法 xpress8k"));
+    CHECK(has_text(run_force.str_out,
+                   L"共 2 个文件：压缩 1、重压 0、解压 0、跳过 1"));
+    CHECK(ntfscompact::probe_file_occupied(str_deep_long));
+    CHECK(child_is_alive(up_child));
+  }
 }
 
 int wmain(int argc, wchar_t** argv) {
