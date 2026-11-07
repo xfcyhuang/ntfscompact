@@ -16,9 +16,9 @@ _Avoid_: 转换、二次压缩
 文件已以指定算法压缩（或不满足压缩条件）时，不做任何修改，仅记录。
 _Avoid_: 忽略、放过
 
-**强制卸载（Forced Release）**:
-文件被占用时直接卸载其所在卷使句柄失效、随后重试的操作。需管理员权限；失败或非提权则跳过。
-_Avoid_: 强杀、解锁
+**升级释放（Escalated Release）**:
+文件被占用时按固定阶梯逐级释放占用者：Oplock 协商、Restart Manager 优雅关、Restart Manager 强制关、句柄强关，逐级升级直至占用解除；句柄强关需管理员权限，默认只关低风险占用者。绝不卷卸载、绝不 TerminateProcess。
+_Avoid_: 强制卸载、卷卸载、demount、强杀、解锁
 
 **解压（Uncompress）**:
 解除文件压缩，恢复常规存储形态。
