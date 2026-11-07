@@ -698,12 +698,17 @@ ReleaseFn make_oplock_level(
       return ro_busy;
     }
     if (u4_wait != WAIT_TIMEOUT) {
+      const DWORD u4_wait_error{GetLastError()};
       CancelIoEx(h_file, &ov_wait);
+      DWORD u4_aborted_bytes{0};
+      GetOverlappedResult(h_file, &ov_wait, &u4_aborted_bytes, TRUE);
       ro_busy.str_detail = std::format(
-          L"oplock 协商等待失败（错误码 {}），降级", GetLastError());
+          L"oplock 协商等待失败（错误码 {}），降级", u4_wait_error);
       return ro_busy;
     }
     CancelIoEx(h_file, &ov_wait);
+    DWORD u4_aborted_bytes{0};
+    GetOverlappedResult(h_file, &ov_wait, &u4_aborted_bytes, TRUE);
     up_file.reset();
     if (!fn_probe_resolved(str_long_path)) {
       return fn_released(L"经 Oplock 协商释放");
