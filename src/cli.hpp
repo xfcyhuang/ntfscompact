@@ -20,7 +20,7 @@ struct Options {
   bool b_dry_run{false};
   bool b_quiet{false};
   bool b_verbose{false};
-
+  bool b_force_close_all{false};
 };
 
 struct ParseResult {

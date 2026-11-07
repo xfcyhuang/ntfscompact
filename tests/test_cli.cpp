@@ -73,6 +73,25 @@ TEST_CASE("-a 非法值或缺值为用法错误（退出码 2 语义）") {
   }
 }
 
+TEST_CASE("--force-close-all 默认关，显式传入置位") {
+  SUBCASE("默认关") {
+    const auto pr_result{parse_args({L"p"})};
+    REQUIRE(pr_result.b_ok);
+    CHECK_FALSE(pr_result.opt_options.b_force_close_all);
+  }
+  SUBCASE("显式置位") {
+    const auto pr_result{parse_args({L"--force-close-all", L"p"})};
+    REQUIRE(pr_result.b_ok);
+    CHECK(pr_result.opt_options.b_force_close_all);
+  }
+  SUBCASE("与 -n 组合") {
+    const auto pr_result{parse_args({L"-n", L"--force-close-all", L"p"})};
+    REQUIRE(pr_result.b_ok);
+    CHECK(pr_result.opt_options.b_dry_run);
+    CHECK(pr_result.opt_options.b_force_close_all);
+  }
+}
+
 TEST_CASE("开关 -u -n -q -v 各自置位") {
   SUBCASE("-u 解压") {
     const auto pr_result{parse_args({L"-u", L"p"})};
@@ -199,6 +218,7 @@ TEST_CASE("用法文本覆盖全部选项与算法取值") {
   CHECK(str_usage.find(L"-n") != std::wstring::npos);
   CHECK(str_usage.find(L"-q") != std::wstring::npos);
   CHECK(str_usage.find(L"-v") != std::wstring::npos);
+  CHECK(str_usage.find(L"--force-close-all") != std::wstring::npos);
   CHECK(str_usage.find(L"--help") != std::wstring::npos);
   CHECK(str_usage.find(L"--version") != std::wstring::npos);
 }
