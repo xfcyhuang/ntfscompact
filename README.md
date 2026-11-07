@@ -1,6 +1,6 @@
 # ntfscompact
 
-NTFS 文件 WOF 压缩命令行工具：按指定算法（XPRESS4K / XPRESS8K / XPRESS16K / LZX）压缩文件或目录，已处于指定算法的文件自动跳过，磁盘上的 LZNT1 老文件先解除再重压为指定算法；被占用的文件经升级释放链逐级尝试释放后重试（无需提权）；亦支持解除压缩恢复常规存储。
+NTFS 文件 WOF 压缩命令行工具：按指定算法（XPRESS4K / XPRESS8K / XPRESS16K / LZX）压缩文件或目录，已处于指定算法的文件自动跳过，磁盘上的 LZNT1 老文件先解除再重压为指定算法；被占用的文件经升级释放链（Oplock 协商 → Restart Manager 优雅/强制关 → 句柄强关）逐级尝试释放后重试；亦支持解除压缩恢复常规存储。
 
 对应系统功能与 `compact /exe` 同源（Windows Overlay Filter，WOF），文件压缩后保持透明读写，读取时自动解压，无需任何挂载/解包步骤。
 
@@ -8,7 +8,7 @@ NTFS 文件 WOF 压缩命令行工具：按指定算法（XPRESS4K / XPRESS8K / 
 
 - Windows 10 1709+（WOF 四算法与 `WofSetFileDataLocation` XPRESS16K 支持的下限）
 - NTFS 本地卷（WOF 压缩不支持 ReFS/FAT32/exFAT 与 SMB/网络卷）
-- 普通压缩/解压/干跑与占用释放均无需管理员权限（占用释放见下）
+- 普通压缩/解压/干跑与占用释放的 Oplock/Restart Manager 级均无需管理员权限；仅句柄强关级需管理员（见下）
 
 ## 构建
 
@@ -17,7 +17,7 @@ CMake + Ninja + Clang（llvm-mingw 或 LLVM-Clang 21+，需支持 C++26 `import 
 ```sh
 cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=D:/software/LLVM/bin/c++.exe
 cmake --build build
-ctest --test-dir build --timeout 60
+ctest --test-dir build
 ```
 
 产物为 `build/ntfscompact.exe`。测试集中含真实压缩用例（在本机临时目录执行），不要在网络卷上运行 ctest。
@@ -25,7 +25,7 @@ ctest --test-dir build --timeout 60
 ## 用法
 
 ```
-ntfscompact <路径...> [-a xpress4k|xpress8k|xpress16k|lzx] [-u] [-n] [-q] [-v]
+ntfscompact <路径...> [-a xpress4k|xpress8k|xpress16k|lzx] [-u] [-n] [-q] [-v] [--force-close-all]
 ```
 
 | 选项 | 说明 |
@@ -35,6 +35,7 @@ ntfscompact <路径...> [-a xpress4k|xpress8k|xpress16k|lzx] [-u] [-n] [-q] [-v]
 | `-n` | 干跑：只报告将执行的动作，不修改任何文件 |
 | `-q` | 静默：仅输出末尾汇总一行（失败信息仍输出到 stderr） |
 | `-v` | 详细输出：含逐文件行与现状检测、字节数明细 |
+| `--force-close-all` | 放行句柄强关风险闸门：默认只关低风险占用者，此开关显式放行全部（自担风险，见占用处理节） |
 | `--help` / `--version` | 显示用法 / 版本 |
 
 路径可为文件、目录（递归）或通配符，可多个。输出逐文件行走 stdout，失败行走 stderr。
@@ -71,6 +72,7 @@ ntfscompact -u D:\data                     # 解除压缩恢复常规存储
 | LZNT1（传统压缩） | 重压：先解除再压为指定算法 | 解压 |
 | 内核判定无收益 | 跳过（无收益，保持原样，不计错误） | 解压 |
 | ≤4KB | 跳过（文件大小 ≤4KB） | 跳过 |
+| 执行时被其他进程占用 | 先经升级释放链逐级释放再执行；链尽跳过（见下节） | 同压缩模式 |
 | WIM/Cloud backing、EFS 加密、非常规 reparse point、pagefile/hiberfil/swapfile、WinSxS 内文件 | 跳过（黑名单） | 跳过（WIM/Cloud 不解除） |
 
 对遍历进入的普通目录与显式根目录：
@@ -106,25 +108,29 @@ ntfscompact -u D:\data                     # 解除压缩恢复常规存储
 
 当前阶梯（自上而下）：
 
-1. **Restart Manager 优雅关**（`rstrtmgr.dll` 动态加载）：`RmShutdown(0)`，对自有进程无需提权；
-2. **Restart Manager 强制关**：优雅关未生效再 `RmShutdown(RmForceShutdown)`。
+1. **Oplock 协商前置级**：以可共享写入句柄请求 `FSCTL_REQUEST_OPLOCK`，被动等待参与 oplock 协议的持有者（编辑器、同步盘等）响应中断自行让位；短超时（2s）即降级，不参与协议的独占持有者立即降级；
+2. **Restart Manager 优雅关**（`rstrtmgr.dll` 动态加载）：`RmShutdown(0)`，让有状态进程体面退出；
+3. **Restart Manager 强制关**：优雅关未生效再 `RmShutdown(RmForceShutdown)`；
+4. **句柄强关**：枚举系统句柄表定位目标文件句柄后 `DuplicateHandle(DUPLICATE_CLOSE_SOURCE)` 强关。**需管理员权限**，非提权自动止步并如实报告。带风险闸门：默认只关低风险占用者（索引器、杀毒临时句柄、自启辅助进程等），explorer、数据库/虚拟机/编辑器类有状态进程与系统关键进程默认跳过；`--force-close-all` 为显式逃生开关，放行全部占用者（自担风险）。
 
-链内晋级间退避探测（100/300/1000ms，单文件总预算 5s）；升级链尽仍占用则该文件计跳过并说明原因。释放发生的级别与被关进程（进程名 PID）随逐行报告默认输出（「升级释放：RM 强制关（a.exe PID 123）」样式）。
+链内晋级间退避探测（100/300/1000ms，单文件总预算 5s）；升级链尽仍占用则该文件计跳过并说明原因（不计错误）。释放发生的级别与被关进程（进程名 PID）随逐行报告默认输出（「升级释放：RM 强制关（a.exe PID 123）」样式），`-q` 下与逐文件行一并抑制。
 
 **风险声明（务必阅读）：**
 
-- 绝不 `TerminateProcess`、绝不卷卸载；进程关闭一律经 Restart Manager 优雅/强制关。
-- 释放的进程是被占用文件的实际持有者；有状态进程（编辑器、数据库等）被强制关前有机会体面退出（优雅关先行）。
+- 绝不 `TerminateProcess`、绝不卷卸载；进程关闭一律经 Restart Manager 优雅/强制关，句柄强关只关句柄不杀进程。
+- 释放的进程是被占用文件的实际持有者；有状态进程（编辑器、数据库等）被强制关前有机会体面退出（优雅关先行），参与 oplock 协议的持有者在第一级即自行让位。
+- 句柄强关默认闸门只放低风险占用者，explorer/数据库/虚拟机/编辑器与系统关键进程须显式 `--force-close-all` 才会被强关句柄。
 - 升级链尽仍占用不重试（不计错误），该文件计跳过。
 - SMB/网络卷上的占用同样经升级链处理，卷级操作不存在。
 
 ## 权限说明
 
 - 普通压缩、解压、干跑：**无需管理员**，对目标文件有读写权限即可。
-- 占用释放（Restart Manager 两级）：**无需管理员**，对自有进程生效；非提权运行遇到无法经 RM 释放的占用时，该文件计跳过并如实报告。
+- 占用释放 Oplock 协商级与 Restart Manager 两级：**无需管理员**，对自有（同用户会话）进程即可生效；非提权运行遇到无法经这三级释放的占用时进入句柄强关级。
+- 占用释放句柄强关级：**需管理员**（枚举系统句柄表并强关他人进程的句柄）；非提权自动止步，该文件计跳过并如实报告止步原因。
 
 ## 开发
 
 - 代码规范：C++26，`import std;`，自由函数 + 聚合 struct，`std::expected` 错误处理，零注释零警告（`-Wall -Wextra -Wpedantic`）。
 - 领域术语见 [GLOSSARY.md](GLOSSARY.md)；架构决策见 [docs/adr/](docs/adr/)。
-- 测试：`ctest --test-dir build --timeout 60`（含 `e2e_flow` 端到端：混合目录压缩→复核→干跑全跳过→解压→复核）。
+- 测试：`ctest --test-dir build`（各测试在 CMake 限时 180 秒；含 `e2e_flow` 端到端：混合目录压缩→复核→干跑全跳过→解压→复核，以及 hold 助手子进程驱动的占用释放全链场景：RM 优雅/强制关审计、`-q` 语义、链尽跳过、`--force-close-all`）。
