@@ -51,7 +51,8 @@ int wmain(int argc, wchar_t** argv) {
   ntfscompact::UncompressFn fn_uncompress{std::move(xe_uncompressor).value()};
   ntfscompact::ReleaseFn fn_release{};
   if (!pr_parse.opt_options.b_dry_run) {
-    auto xe_releaser{ntfscompact::make_real_releaser()};
+    auto xe_releaser{
+        ntfscompact::make_real_releaser(pr_parse.opt_options.b_force_close_all)};
     if (!xe_releaser.has_value()) {
       ntfscompact::write_utf8(
           stderr, L"ntfscompact: " + std::move(xe_releaser).error() + L"\n");

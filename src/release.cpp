@@ -776,7 +776,8 @@ std::expected<ReleaseFn, std::wstring> make_rm_force_level() {
   return make_rm_shutdown_level(true);
 }
 
-std::expected<ReleaseFn, std::wstring> make_real_releaser() {
+std::expected<ReleaseFn, std::wstring> make_real_releaser(
+    bool b_force_close_all) {
   auto xe_graceful{make_rm_graceful_level()};
   if (!xe_graceful.has_value()) {
     return xe_graceful;
@@ -786,7 +787,9 @@ std::expected<ReleaseFn, std::wstring> make_real_releaser() {
     return xe_force;
   }
   return make_escalating_releaser(
-      {std::move(xe_graceful).value(), std::move(xe_force).value()},
+      {make_oplock_level(), std::move(xe_graceful).value(),
+       std::move(xe_force).value(),
+       make_handle_force_level(b_force_close_all)},
       EscalationBackoff{});
 }
 

@@ -65,6 +65,7 @@ std::expected<ReleaseFn, std::wstring> make_rm_graceful_level();
 
 std::expected<ReleaseFn, std::wstring> make_rm_force_level();
 
-std::expected<ReleaseFn, std::wstring> make_real_releaser();
+std::expected<ReleaseFn, std::wstring> make_real_releaser(
+    bool b_force_close_all = false);
 
 }

@@ -801,6 +801,70 @@ TEST_CASE("make_oplock_level：参与 oplock 协议的持有者响应中断让�
   CHECK(u4_code == 0);
 }
 
+TEST_CASE("make_escalating_releaser：RM 两级假败后句柄强关级可达（提权真实强关自启进程，非提权如实止步）") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  const std::wstring str_file{ntfscompact_test::temp_long_api_path(
+      ntfscompact_test::temp_sub(tmp_dir, L"held.bin"))};
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"held.bin", 8192));
+  const std::wstring str_hold_exe{hold_exe_path()};
+  REQUIRE(GetFileAttributesW(str_hold_exe.c_str()) != INVALID_FILE_ATTRIBUTES);
+  HoldChildPtr up_child{spawn_hold_child(str_hold_exe, str_file, false)};
+  REQUIRE(up_child);
+  REQUIRE(wait_file_occupied(str_file));
+
+  ntfscompact::ReleaseFn fn_fake_graceful{
+      [](const std::wstring&) {
+        ntfscompact::ReleaseOutcome ro_busy{};
+        ro_busy.e_status = ntfscompact::ReleaseOutcome::Status::kBusy;
+        ro_busy.e_level = ntfscompact::ReleaseOutcome::Level::kRmGraceful;
+        ro_busy.str_detail = L"RM 优雅关失败（模拟）";
+        return ro_busy;
+      }};
+  ntfscompact::ReleaseFn fn_fake_force{
+      [](const std::wstring&) {
+        ntfscompact::ReleaseOutcome ro_busy{};
+        ro_busy.e_status = ntfscompact::ReleaseOutcome::Status::kBusy;
+        ro_busy.e_level = ntfscompact::ReleaseOutcome::Level::kRmForce;
+        ro_busy.str_detail = L"RM 强制关失败（模拟）";
+        return ro_busy;
+      }};
+  const auto xe_handle{ntfscompact::make_handle_force_level(false)};
+  const auto xe_chain{ntfscompact::make_escalating_releaser(
+      {ntfscompact::make_oplock_level(100), std::move(fn_fake_graceful),
+       std::move(fn_fake_force), std::move(xe_handle)},
+      ntfscompact::EscalationBackoff{})};
+  REQUIRE(xe_chain.has_value());
+  const ntfscompact::ReleaseOutcome ro_outcome{xe_chain.value()(str_file)};
+
+  if (ntfscompact::process_is_elevated()) {
+    CHECK(ro_outcome.e_status ==
+          ntfscompact::ReleaseOutcome::Status::kReleased);
+    CHECK(ro_outcome.e_level == ntfscompact::ReleaseOutcome::Level::kHandle);
+    CHECK_FALSE(closed_pid_name(ro_outcome.vec_closed, up_child->u4_pid)
+                    .empty());
+    CHECK_FALSE(ntfscompact::probe_file_occupied(str_file));
+  } else {
+    CHECK(ro_outcome.e_status == ntfscompact::ReleaseOutcome::Status::kBusy);
+    CHECK(has(narrow(ro_outcome.str_detail), "管理员"));
+    CHECK(ro_outcome.vec_closed.empty());
+    CHECK(ntfscompact::probe_file_occupied(str_file));
+  }
+}
+
+TEST_CASE("make_real_releaser：空闲文件不进链且开关参数可传导") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  const std::wstring str_file{ntfscompact_test::temp_long_api_path(
+      ntfscompact_test::temp_sub(tmp_dir, L"free.bin"))};
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"free.bin", 8192));
+
+  const auto xe_releaser{ntfscompact::make_real_releaser(true)};
+  REQUIRE(xe_releaser.has_value());
+  const ntfscompact::ReleaseOutcome ro_outcome{xe_releaser.value()(str_file)};
+  CHECK(ro_outcome.e_status == ntfscompact::ReleaseOutcome::Status::kFree);
+}
+
 TEST_CASE("run_pipeline：注入假释放后压缩继续") {
   ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
   REQUIRE(tmp_dir->b_ok);
