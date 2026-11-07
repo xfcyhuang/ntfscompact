@@ -92,8 +92,21 @@ bool is_marked_compressed(const WIN32_FIND_DATAW& fd_find) {
   return (fd_find.dwFileAttributes & FILE_ATTRIBUTE_COMPRESSED) != 0;
 }
 
+bool enumeration_interrupted(ScanOutcome& so_out,
+                             const InterruptPoller& fn_poll) {
+  if (so_out.b_interrupted) {
+    return true;
+  }
+  if (interrupt_requested(fn_poll)) {
+    so_out.b_interrupted = true;
+    return true;
+  }
+  return false;
+}
+
 void walk_directory(const std::wstring& str_long_dir,
-                    const std::wstring& str_display_dir, ScanOutcome& so_out) {
+                    const std::wstring& str_display_dir, ScanOutcome& so_out,
+                    const InterruptPoller& fn_poll) {
   const std::wstring str_pattern{str_long_dir + L"\\*"};
   WIN32_FIND_DATAW fd_find{};
   HANDLE h_find{FindFirstFileW(str_pattern.c_str(), &fd_find)};
@@ -106,6 +119,9 @@ void walk_directory(const std::wstring& str_long_dir,
     if (wcscmp(fd_find.cFileName, L".") == 0 ||
         wcscmp(fd_find.cFileName, L"..") == 0) {
       continue;
+    }
+    if (enumeration_interrupted(so_out, fn_poll)) {
+      break;
     }
     const std::wstring str_child_long{str_long_dir + L"\\" + fd_find.cFileName};
     const std::wstring str_child_disp{str_display_dir + L"\\" +
@@ -120,7 +136,7 @@ void walk_directory(const std::wstring& str_long_dir,
         if (is_marked_compressed(fd_find)) {
           so_out.vec_flagged_dirs.push_back({str_child_long, str_child_disp});
         }
-        walk_directory(str_child_long, str_child_disp, so_out);
+        walk_directory(str_child_long, str_child_disp, so_out, fn_poll);
       }
     } else {
       const FileMetadata fm_meta{make_file_metadata(str_child_disp, fd_find)};
@@ -136,7 +152,8 @@ void walk_directory(const std::wstring& str_long_dir,
   FindClose(h_find);
 }
 
-void handle_explicit_path(const std::wstring& str_raw, ScanOutcome& so_out) {
+void handle_explicit_path(const std::wstring& str_raw, ScanOutcome& so_out,
+                          const InterruptPoller& fn_poll) {
   const std::wstring str_long_path{to_long_path(str_raw)};
   const std::wstring str_display{to_display_path(str_long_path)};
   WIN32_FIND_DATAW fd_find{};
@@ -155,7 +172,7 @@ void handle_explicit_path(const std::wstring& str_raw, ScanOutcome& so_out) {
       if (!has_winsxs_component(str_display) && is_marked_compressed(fd_find)) {
         so_out.vec_flagged_dirs.push_back({str_long_path, str_display});
       }
-      walk_directory(str_long_path, str_display, so_out);
+      walk_directory(str_long_path, str_display, so_out, fn_poll);
     }
     return;
   }
@@ -168,7 +185,8 @@ void handle_explicit_path(const std::wstring& str_raw, ScanOutcome& so_out) {
   }
 }
 
-void handle_wildcard(const std::wstring& str_raw, ScanOutcome& so_out) {
+void handle_wildcard(const std::wstring& str_raw, ScanOutcome& so_out,
+                     const InterruptPoller& fn_poll) {
   const std::size_t u8_sep{str_raw.find_last_of(L"\\/")};
   const std::wstring str_file_pattern{
       u8_sep == std::wstring::npos ? str_raw : str_raw.substr(u8_sep + 1)};
@@ -191,6 +209,9 @@ void handle_wildcard(const std::wstring& str_raw, ScanOutcome& so_out) {
     return;
   }
   do {
+    if (enumeration_interrupted(so_out, fn_poll)) {
+      break;
+    }
     if (is_directory(fd_find)) continue;
     const std::wstring str_child_disp{str_parent_disp + L"\\" +
                                       fd_find.cFileName};
@@ -248,12 +269,15 @@ bool check_file_candidate(const FileMetadata& fm_metadata,
 }
 
 void scan_paths(const std::vector<std::wstring>& vec_raw_paths,
-                ScanOutcome& so_out) {
+                ScanOutcome& so_out, const InterruptPoller& fn_poll) {
   for (const std::wstring& str_raw : vec_raw_paths) {
+    if (enumeration_interrupted(so_out, fn_poll)) {
+      break;
+    }
     if (has_wildcard(str_raw)) {
-      handle_wildcard(str_raw, so_out);
+      handle_wildcard(str_raw, so_out, fn_poll);
     } else {
-      handle_explicit_path(str_raw, so_out);
+      handle_explicit_path(str_raw, so_out, fn_poll);
     }
   }
 }

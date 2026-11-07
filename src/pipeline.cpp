@@ -133,9 +133,9 @@ void collect_byte_stats(PipelineResult& pl_result) {
   }
 }
 
-ScanOutcome run_scan(const Options& opt_options) {
+ScanOutcome run_scan(const Options& opt_options, const InterruptPoller& fn_poll) {
   ScanOutcome so_scan{};
-  scan_paths(opt_options.vec_paths, so_scan);
+  scan_paths(opt_options.vec_paths, so_scan, fn_poll);
   return so_scan;
 }
 
@@ -143,9 +143,13 @@ int run_pipeline(const Options& opt_options, const DetectFn& fn_detect,
                  const ExecuteFn& fn_execute,
                  const UncompressFn& fn_uncompress, const ReleaseFn& fn_release,
                  const DirFlagFn& fn_dir_flag, std::FILE* f_out,
-                 std::FILE* f_err) {
+                 std::FILE* f_err, const InterruptPoller& fn_poll) {
   PipelineResult pl_result{};
-  const ScanOutcome so_scan{run_scan(opt_options)};
+  const ScanOutcome so_scan{run_scan(opt_options, fn_poll)};
+  const bool b_scan_interrupted{so_scan.b_interrupted};
+  bool b_interrupted{b_scan_interrupted};
+  std::wstring str_last_done{};
+  std::wstring str_stop_path{};
   for (const ScanSkip& sk_skip : so_scan.vec_skipped) {
     pl_result.vec_reports.push_back(make_skip_report(sk_skip));
   }
@@ -158,6 +162,16 @@ int run_pipeline(const Options& opt_options, const DetectFn& fn_detect,
 
   if (!opt_options.b_dry_run) {
     for (DirFlagReport& df_report : pl_result.vec_dir_flags) {
+      if (b_interrupted) {
+        break;
+      }
+      if (interrupt_requested(fn_poll)) {
+        b_interrupted = true;
+        str_stop_path = str_last_done.empty() ? df_report.str_display_path
+                                              : str_last_done;
+        break;
+      }
+      str_last_done = df_report.str_display_path;
       if (!fn_dir_flag) {
         df_report.str_error = L"标记清除器未接线";
         ++pl_result.i4_failures;
@@ -180,6 +194,13 @@ int run_pipeline(const Options& opt_options, const DetectFn& fn_detect,
   }
   if (opt_options.b_dry_run) {
     for (const DirFlagReport& df_report : pl_result.vec_dir_flags) {
+      if (b_interrupted) {
+        break;
+      }
+      if (interrupt_requested(fn_poll)) {
+        b_interrupted = true;
+        break;
+      }
       if (!opt_options.b_quiet) {
         write_utf8(f_out, format_dir_flag_line(df_report, opt_options) + L"\n");
       }
@@ -191,6 +212,16 @@ int run_pipeline(const Options& opt_options, const DetectFn& fn_detect,
   }
 
   for (const ScanItem& si_item : so_scan.vec_items) {
+    if (b_interrupted) {
+      break;
+    }
+    if (interrupt_requested(fn_poll)) {
+      b_interrupted = true;
+      str_stop_path = str_last_done.empty() ? si_item.str_display_path
+                                            : str_last_done;
+      break;
+    }
+    str_last_done = si_item.str_display_path;
     FileReport fr_report{};
     fr_report.str_display_path = si_item.str_display_path;
     fr_report.str_long_path = si_item.str_long_path;
@@ -306,7 +337,15 @@ int run_pipeline(const Options& opt_options, const DetectFn& fn_detect,
   collect_byte_stats(pl_result);
 
   write_utf8(f_out, format_summary(pl_result, opt_options) + L"\n");
-  return pl_result.i4_failures > 0 ? 1 : 0;
+  if (b_interrupted) {
+    std::wstring str_note{
+        b_scan_interrupted || opt_options.b_dry_run
+            ? std::wstring{L"已被 Ctrl+C 中断：停止扫描"}
+            : L"已被 Ctrl+C 中断：停止于 " + str_stop_path};
+    write_utf8(f_out, str_note + L"\n");
+  }
+  return b_interrupted ? static_cast<int>(kExitInterrupted)
+                       : (pl_result.i4_failures > 0 ? 1 : 0);
 }
 
 }

@@ -6,6 +6,7 @@ import std;
 #include "detect.hpp"
 #include "dir_flag.hpp"
 #include "executor.hpp"
+#include "interrupt.hpp"
 #include "release.hpp"
 #include "scan.hpp"
 #include "uncompress.hpp"
@@ -223,7 +224,8 @@ inline std::wstring format_summary(const PipelineResult& pl_result,
   return str_line;
 }
 
-ScanOutcome run_scan(const Options& opt_options);
+ScanOutcome run_scan(const Options& opt_options,
+                     const InterruptPoller& fn_poll = InterruptPoller{});
 
 void collect_byte_stats(PipelineResult& pl_result);
 
@@ -233,6 +235,7 @@ int run_pipeline(const Options& opt_options, const DetectFn& fn_detect,
                  const ExecuteFn& fn_execute,
                  const UncompressFn& fn_uncompress, const ReleaseFn& fn_release,
                  const DirFlagFn& fn_dir_flag, std::FILE* f_out,
-                 std::FILE* f_err);
+                 std::FILE* f_err,
+                 const InterruptPoller& fn_poll = InterruptPoller{});
 
 }
