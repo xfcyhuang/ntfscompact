@@ -50,7 +50,9 @@ struct HandleForceDeps {
 ReleaseFn make_handle_force_level(bool b_allow_all,
                                   const HandleForceDeps& deps = {});
 
-ReleaseFn make_oplock_level(std::uint32_t u4_wait_timeout_ms = 2000);
+ReleaseFn make_oplock_level(
+    std::uint32_t u4_wait_timeout_ms = 2000,
+    std::function<bool(const std::wstring&)> fn_probe = {});
 
 std::wstring level_display_name(ReleaseOutcome::Level e_level);
 

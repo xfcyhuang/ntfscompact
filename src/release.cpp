@@ -625,9 +625,25 @@ ReleaseFn make_rm_shutdown_level(std::shared_ptr<const RmContext> sp_ctx,
 
 }
 
-ReleaseFn make_oplock_level(std::uint32_t u4_wait_timeout_ms) {
-  return [u4_wait_timeout_ms](const std::wstring& str_long_path)
+ReleaseFn make_oplock_level(
+    std::uint32_t u4_wait_timeout_ms,
+    std::function<bool(const std::wstring&)> fn_probe) {
+  return [u4_wait_timeout_ms,
+          fn_probe = std::move(fn_probe)](const std::wstring& str_long_path)
              -> ReleaseOutcome {
+    const std::function<bool(const std::wstring&)> fn_probe_resolved{
+        fn_probe ? fn_probe
+                 : std::function<bool(const std::wstring&)>{
+                       [](const std::wstring& str_path) {
+                         return probe_file_occupied(str_path);
+                       }}};
+    const auto fn_released{[](const wchar_t* ptr_detail) {
+      ReleaseOutcome ro_released{};
+      ro_released.e_status = ReleaseOutcome::Status::kReleased;
+      ro_released.e_level = ReleaseOutcome::Level::kOplock;
+      ro_released.str_detail = ptr_detail;
+      return ro_released;
+    }};
     ReleaseOutcome ro_busy{};
     ro_busy.e_status = ReleaseOutcome::Status::kBusy;
     ro_busy.e_level = ReleaseOutcome::Level::kOplock;
@@ -641,7 +657,59 @@ ReleaseFn make_oplock_level(std::uint32_t u4_wait_timeout_ms) {
       return ro_busy;
     }
     HandlePtr up_file{h_file};
-    ro_busy.str_detail = L"oplock 协商未完成，降级";
+    REQUEST_OPLOCK_INPUT_BUFFER roi_input{};
+    roi_input.StructureVersion = REQUEST_OPLOCK_CURRENT_VERSION;
+    roi_input.StructureLength = sizeof(REQUEST_OPLOCK_INPUT_BUFFER);
+    roi_input.RequestedOplockLevel = OPLOCK_LEVEL_CACHE_READ |
+                                     OPLOCK_LEVEL_CACHE_WRITE |
+                                     OPLOCK_LEVEL_CACHE_HANDLE;
+    roi_input.Flags = REQUEST_OPLOCK_INPUT_FLAG_REQUEST;
+    REQUEST_OPLOCK_OUTPUT_BUFFER roo_output{};
+    OVERLAPPED ov_wait{};
+    ov_wait.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (ov_wait.hEvent == nullptr) {
+      ro_busy.str_detail = std::format(
+          L"oplock 协商创建等待事件失败（错误码 {}）", GetLastError());
+      return ro_busy;
+    }
+    HandlePtr up_event{ov_wait.hEvent};
+    const BOOL b_posted{
+        DeviceIoControl(h_file, FSCTL_REQUEST_OPLOCK, &roi_input,
+                        sizeof(roi_input), &roo_output, sizeof(roo_output),
+                        nullptr, &ov_wait)};
+    if (b_posted == FALSE && GetLastError() != ERROR_IO_PENDING) {
+      const DWORD u4_request_error{GetLastError()};
+      up_file.reset();
+      if (!fn_probe_resolved(str_long_path)) {
+        return fn_released(L"经 Oplock 协商释放");
+      }
+      ro_busy.str_detail = std::format(L"oplock 请求被拒（错误码 {}），降级",
+                                       u4_request_error);
+      return ro_busy;
+    }
+    const DWORD u4_wait{
+        WaitForSingleObject(ov_wait.hEvent, u4_wait_timeout_ms)};
+    if (u4_wait == WAIT_OBJECT_0) {
+      up_file.reset();
+      if (!fn_probe_resolved(str_long_path)) {
+        return fn_released(L"经 Oplock 协商释放");
+      }
+      ro_busy.str_detail = L"oplock 锁中断完成但文件仍被占用，降级";
+      return ro_busy;
+    }
+    if (u4_wait != WAIT_TIMEOUT) {
+      CancelIoEx(h_file, &ov_wait);
+      ro_busy.str_detail = std::format(
+          L"oplock 协商等待失败（错误码 {}），降级", GetLastError());
+      return ro_busy;
+    }
+    CancelIoEx(h_file, &ov_wait);
+    up_file.reset();
+    if (!fn_probe_resolved(str_long_path)) {
+      return fn_released(L"经 Oplock 协商释放");
+    }
+    ro_busy.str_detail = std::format(L"oplock 协商等待超时（{}ms），降级",
+                                     u4_wait_timeout_ms);
     return ro_busy;
   };
 }

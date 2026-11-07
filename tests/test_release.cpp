@@ -101,11 +101,23 @@ std::wstring hold_exe_path() {
   return str_module.substr(0, u8_slash) + L"\\ntfscompact_hold.exe";
 }
 
-HoldChildPtr spawn_hold_child(const std::wstring& str_hold_exe,
-                              const std::wstring& str_file, bool b_stubborn) {
+HoldChildPtr spawn_hold_child_ex(const std::wstring& str_hold_exe,
+                                 const std::wstring& str_file, bool b_stubborn,
+                                 bool b_coop, bool b_lock0,
+                                 std::uint32_t u4_close_after_ms) {
   std::wstring str_cmd{L"\"" + str_hold_exe + L"\" \"" + str_file + L"\""};
   if (b_stubborn) {
     str_cmd += L" --stubborn";
+  }
+  if (b_coop) {
+    str_cmd += L" --coop";
+  }
+  if (b_lock0) {
+    str_cmd += L" --lock0";
+  }
+  if (u4_close_after_ms > 0) {
+    str_cmd +=
+        L" --close-after-ms " + std::to_wstring(u4_close_after_ms);
   }
   STARTUPINFOW si_start{};
   si_start.cb = sizeof(si_start);
@@ -121,6 +133,12 @@ HoldChildPtr spawn_hold_child(const std::wstring& str_hold_exe,
   up_child->h_thread = pi_process.hThread;
   up_child->u4_pid = pi_process.dwProcessId;
   return up_child;
+}
+
+HoldChildPtr spawn_hold_child(const std::wstring& str_hold_exe,
+                              const std::wstring& str_file, bool b_stubborn) {
+  return spawn_hold_child_ex(str_hold_exe, str_file, b_stubborn, false, false,
+                             0);
 }
 
 bool wait_file_occupied(const std::wstring& str_file) {
@@ -736,6 +754,51 @@ TEST_CASE("make_oplock_level：独占持有者不参与 oplock 协议，快速�
   CHECK(ro_outcome.vec_closed.empty());
   CHECK(ro_outcome.str_detail.find(L"oplock") != std::wstring::npos);
   CHECK(u8_elapsed_ms < 1500);
+}
+
+TEST_CASE("make_oplock_level：注入短超时被动等待后降级，不真等默认预算") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  const std::wstring str_file{ntfscompact_test::temp_long_api_path(
+      ntfscompact_test::temp_sub(tmp_dir, L"held.bin"))};
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"held.bin", 8192));
+
+  const std::uint64_t u8_start_ms{GetTickCount64()};
+  const auto fn_level{ntfscompact::make_oplock_level(
+      60, [](const std::wstring&) { return true; })};
+  const ntfscompact::ReleaseOutcome ro_outcome{fn_level(str_file)};
+  const std::uint64_t u8_elapsed_ms{GetTickCount64() - u8_start_ms};
+
+  CHECK(ro_outcome.e_status == ntfscompact::ReleaseOutcome::Status::kBusy);
+  CHECK(ro_outcome.e_level == ntfscompact::ReleaseOutcome::Level::kOplock);
+  CHECK(ro_outcome.vec_closed.empty());
+  CHECK(ro_outcome.str_detail.find(L"超时") != std::wstring::npos);
+  CHECK(u8_elapsed_ms < 1500);
+}
+
+TEST_CASE("make_oplock_level：参与 oplock 协议的持有者响应中断让位即生效") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  const std::wstring str_file{ntfscompact_test::temp_long_api_path(
+      ntfscompact_test::temp_sub(tmp_dir, L"held.bin"))};
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"held.bin", 8192));
+  const std::wstring str_hold_exe{hold_exe_path()};
+  REQUIRE(GetFileAttributesW(str_hold_exe.c_str()) != INVALID_FILE_ATTRIBUTES);
+  HoldChildPtr up_child{
+      spawn_hold_child_ex(str_hold_exe, str_file, false, true, false, 0)};
+  REQUIRE(up_child);
+  Sleep(300);
+  REQUIRE(WaitForSingleObject(up_child->h_process, 0) == WAIT_TIMEOUT);
+
+  const auto fn_level{ntfscompact::make_oplock_level(500)};
+  const ntfscompact::ReleaseOutcome ro_outcome{fn_level(str_file)};
+
+  CHECK(ro_outcome.e_status == ntfscompact::ReleaseOutcome::Status::kReleased);
+  CHECK(ro_outcome.e_level == ntfscompact::ReleaseOutcome::Level::kOplock);
+  CHECK_FALSE(ntfscompact::probe_file_occupied(str_file));
+  DWORD u4_code{0};
+  CHECK(wait_child_exit(up_child->h_process, 15000, u4_code));
+  CHECK(u4_code == 0);
 }
 
 TEST_CASE("run_pipeline：注入假释放后压缩继续") {
