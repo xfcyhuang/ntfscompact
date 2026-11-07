@@ -19,35 +19,6 @@ bool probe_file_occupied(const std::wstring& str_long_path) {
   return GetLastError() == ERROR_SHARING_VIOLATION;
 }
 
-bool dismount_volume_for(const std::wstring& str_long_path) {
-  wchar_t arr_volume[MAX_PATH]{};
-  if (!GetVolumePathNameW(str_long_path.c_str(), arr_volume, MAX_PATH)) {
-    return false;
-  }
-  std::wstring str_volume{arr_volume};
-  if (str_volume.size() < 2 || str_volume[1] != L':') {
-    return false;
-  }
-  const std::wstring str_root{str_volume.substr(0, 2)};
-  const DWORD u4_attrs{GetFileAttributesW(str_root.c_str())};
-  if (u4_attrs == INVALID_FILE_ATTRIBUTES ||
-      (u4_attrs & FILE_ATTRIBUTE_READONLY) != 0) {
-    return false;
-  }
-  const std::wstring str_device{L"\\.\\" + str_root};
-  HANDLE h_volume{CreateFileW(str_device.c_str(), GENERIC_READ | GENERIC_WRITE,
-                              FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-                              OPEN_EXISTING, 0, nullptr)};
-  if (h_volume == INVALID_HANDLE_VALUE) {
-    return false;
-  }
-  DWORD u4_bytes{0};
-  const BOOL b_ok{DeviceIoControl(h_volume, FSCTL_DISMOUNT_VOLUME, nullptr, 0,
-                                  nullptr, 0, &u4_bytes, nullptr)};
-  CloseHandle(h_volume);
-  return b_ok != FALSE;
-}
-
 bool process_is_elevated() {
   HANDLE h_token{nullptr};
   if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &h_token)) {
@@ -324,36 +295,21 @@ std::expected<ReleaseFn, std::wstring> make_escalating_releaser(
       }};
 }
 
-std::expected<ReleaseFn, std::wstring> make_real_releaser(
-    const DismountFn& fn_dismount) {
-  if (!fn_dismount) {
-    return std::unexpected(L"卷卸载函数未接线");
+std::wstring release_audit_entry(const ReleaseOutcome& ro_outcome) {
+  std::wstring str_entry{level_display_name(ro_outcome.e_level)};
+  if (!ro_outcome.vec_closed.empty()) {
+    str_entry += L"（";
+    for (std::size_t u8_index{0}; u8_index < ro_outcome.vec_closed.size();
+         ++u8_index) {
+      if (u8_index > 0) {
+        str_entry += L"、";
+      }
+      str_entry += std::format(L"{} PID {}", ro_outcome.vec_closed[u8_index].str_name,
+                               ro_outcome.vec_closed[u8_index].u4_pid);
+    }
+    str_entry += L"）";
   }
-  return ReleaseFn{[fn_dismount](
-                       const std::wstring& str_long_path) -> ReleaseOutcome {
-    if (!probe_file_occupied(str_long_path)) {
-      ReleaseOutcome ro_free{};
-      ro_free.e_status = ReleaseOutcome::Status::kFree;
-      return ro_free;
-    }
-    if (!process_is_elevated()) {
-      ReleaseOutcome ro_busy{};
-      ro_busy.e_status = ReleaseOutcome::Status::kBusy;
-      ro_busy.str_detail = L"占用不可释放：直接卷卸载需管理员权限";
-      return ro_busy;
-    }
-    if (fn_dismount(str_long_path) && !probe_file_occupied(str_long_path)) {
-      ReleaseOutcome ro_ok{};
-      ro_ok.e_status = ReleaseOutcome::Status::kReleased;
-      ro_ok.b_dismounted = true;
-      ro_ok.str_detail = L"经卷卸载释放";
-      return ro_ok;
-    }
-    ReleaseOutcome ro_busy{};
-    ro_busy.e_status = ReleaseOutcome::Status::kBusy;
-    ro_busy.str_detail = L"占用不可释放：卷卸载失败或卸载后仍被占用";
-    return ro_busy;
-  }};
+  return str_entry;
 }
 
 std::expected<ReleaseFn, std::wstring> make_rm_shutdown_level(bool b_force) {

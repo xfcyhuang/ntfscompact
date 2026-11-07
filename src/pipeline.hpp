@@ -122,8 +122,8 @@ inline std::wstring format_report_line_core(const FileReport& fr_report,
 inline std::wstring format_report_line(const FileReport& fr_report,
                                        const Options& opt_options) {
   std::wstring str_line{format_report_line_core(fr_report, opt_options)};
-  if (opt_options.b_verbose && !fr_report.vec_released.empty()) {
-    str_line += L"；强制卸载：";
+  if (!fr_report.vec_released.empty()) {
+    str_line += L"；升级释放：";
     for (std::size_t u8_index{0}; u8_index < fr_report.vec_released.size();
          ++u8_index) {
       if (u8_index > 0) {

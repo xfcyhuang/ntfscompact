@@ -119,8 +119,9 @@ ReleaseRecorder make_release_recorder() {
   ReleaseRecorder rec_result{};
   rec_result.ro_result.e_status =
       ntfscompact::ReleaseOutcome::Status::kReleased;
-  rec_result.ro_result.b_dismounted = true;
-  rec_result.ro_result.str_detail = L"经卷卸载释放";
+  rec_result.ro_result.e_level = ntfscompact::ReleaseOutcome::Level::kRmForce;
+  rec_result.ro_result.vec_closed = {{4242, L"hold_app.exe"}};
+  rec_result.ro_result.str_detail = L"经 RM 强制关释放";
   return rec_result;
 }
 
@@ -136,7 +137,7 @@ ntfscompact::ReleaseFn make_busy_releaser(std::vector<std::wstring>& vec_calls) 
     vec_calls.push_back(str_long_path);
     ntfscompact::ReleaseOutcome ro_busy{};
     ro_busy.e_status = ntfscompact::ReleaseOutcome::Status::kBusy;
-    ro_busy.str_detail = L"占用不可释放：卷卸载失败（模拟）";
+    ro_busy.str_detail = L"占用不可释放：升级链尽后仍被占用（模拟）";
     return ro_busy;
   };
 }
@@ -312,6 +313,37 @@ TEST_CASE("run_pipeline：干跑输出每文件计划行与汇总，不执行，
   CHECK(contains(str_text, L"共 3 个文件：压缩 1、重压 1、解压 0、跳过 1"));
   CHECK_FALSE(contains(str_text, L"压缩/重压"));
   CHECK(recorder.vec_calls.empty());
+}
+
+TEST_CASE("run_pipeline：干跑遇占用文件不触发释放") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"plain.bin", 8192));
+  TestFileLock lock_file{
+      lock_test_file(ntfscompact_test::temp_long_api_path(
+          ntfscompact_test::temp_sub(tmp_dir, L"plain.bin")))};
+  REQUIRE(lock_file);
+
+  Options opt_case{compress_options()};
+  opt_case.b_dry_run = true;
+  opt_case.vec_paths.push_back(ntfscompact_test::temp_path(tmp_dir));
+  const DetectFn fn_detect{fake_detect};
+  ExecuteRecorder recorder{};
+  ReleaseRecorder rec_release{make_release_recorder()};
+
+  std::FILE* f_out{std::tmpfile()};
+  REQUIRE(f_out != nullptr);
+  const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
+                                UncompressFn{}, make_record_releaser(rec_release), DirFlagFn{},
+                                f_out, f_out)};
+  const std::wstring str_text{read_all(f_out)};
+  std::fclose(f_out);
+
+  CHECK(i4_code == 0);
+  CHECK(rec_release.vec_calls.empty());
+  CHECK(recorder.vec_calls.empty());
+  CHECK_FALSE(contains(str_text, L"升级释放"));
+  CHECK(contains(str_text, L"[压缩] "));
 }
 
 TEST_CASE("run_pipeline：真实模式执行压缩，每文件结果行与汇总落账") {
@@ -626,7 +658,7 @@ TEST_CASE("run_pipeline：退出码边界——全部跳过为 0，全部失败�
   }
 }
 
-TEST_CASE("run_pipeline：-v 汇总与逐文件行同出，占用项带卷卸载记录") {
+TEST_CASE("run_pipeline：-v 汇总与逐文件行同出，占用项带升级释放记录") {
   ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
   REQUIRE(tmp_dir->b_ok);
   REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"plain.bin", 8192));
@@ -657,7 +689,7 @@ TEST_CASE("run_pipeline：-v 汇总与逐文件行同出，占用项带卷卸载
   CHECK(contains(str_text, L"；压缩/重压 8192 → 8192 字节，节省 0%"));
 }
 
-TEST_CASE("run_pipeline：占用经强制卸载后执行且 -v 列出被关进程名") {
+TEST_CASE("run_pipeline：占用经升级释放后执行，默认输出级与被关进程") {
   ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
   REQUIRE(tmp_dir->b_ok);
   REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"plain.bin", 8192));
@@ -667,7 +699,6 @@ TEST_CASE("run_pipeline：占用经强制卸载后执行且 -v 列出被关进�
   REQUIRE(lock_file);
 
   Options opt_case{compress_options()};
-  opt_case.b_verbose = true;
   opt_case.vec_paths.push_back(ntfscompact_test::temp_path(tmp_dir));
   const DetectFn fn_detect{fake_detect};
   ExecuteRecorder recorder{};
@@ -686,13 +717,12 @@ TEST_CASE("run_pipeline：占用经强制卸载后执行且 -v 列出被关进�
   CHECK(rec_release.vec_calls[0].starts_with(L"\\\\?\\"));
   CHECK(contains(rec_release.vec_calls[0], L"plain.bin"));
   REQUIRE(recorder.vec_calls.size() == 1);
-  CHECK(contains(str_text, L"plain.bin：现状 未压缩，已压缩为指定算法 xpress8k（8192 → "));
-  CHECK_FALSE(contains(str_text, L"→ 0 字节）"));
-  CHECK(contains(str_text, L"；强制卸载：已卸载所在卷"));
+  CHECK(contains(str_text, L"plain.bin：已压缩为指定算法 xpress8k"));
+  CHECK(contains(str_text, L"；升级释放：RM 强制关（hold_app.exe PID 4242）"));
   CHECK(contains(str_text, L"共 1 个文件：压缩 1、重压 0、解压 0、跳过 0"));
 }
 
-TEST_CASE("run_pipeline：非 -v 模式不输出被关进程名") {
+TEST_CASE("run_pipeline：非 -v 模式同样默认输出升级释放审计") {
   ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
   REQUIRE(tmp_dir->b_ok);
   REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"plain.bin", 8192));
@@ -718,7 +748,8 @@ TEST_CASE("run_pipeline：非 -v 模式不输出被关进程名") {
   CHECK(i4_code == 0);
   CHECK(rec_release.vec_calls.size() == 1);
   CHECK(contains(str_text, L"plain.bin：已压缩为指定算法 xpress8k"));
-  CHECK_FALSE(contains(str_text, L"强制卸载"));
+  CHECK(contains(str_text, L"；升级释放：RM 强制关（hold_app.exe PID 4242）"));
+  CHECK_FALSE(contains(str_text, L"现状 "));
 }
 
 TEST_CASE("run_pipeline：占用不可释放计跳过不计失败") {
@@ -750,11 +781,11 @@ TEST_CASE("run_pipeline：占用不可释放计跳过不计失败") {
   CHECK(contains(vec_release_calls[0], L"plain.bin"));
   CHECK(recorder.vec_calls.size() == 1);
   CHECK(contains(str_text, L"[跳过] "));
-  CHECK(contains(str_text, L"plain.bin：占用不可释放：卷卸载失败（模拟）"));
+  CHECK(contains(str_text, L"plain.bin：占用不可释放：升级链尽后仍被占用（模拟）"));
   CHECK(contains(str_text, L"共 2 个文件：压缩 1、重压 0、解压 0、跳过 1"));
 }
 
-TEST_CASE("run_pipeline：执行器报 32 时先强制卸载再重试一次") {
+TEST_CASE("run_pipeline：执行器报 32 时先升级释放再重试一次") {
   ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
   REQUIRE(tmp_dir->b_ok);
   REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"plain.bin", 8192));
@@ -853,7 +884,7 @@ TEST_CASE("run_pipeline：释放后重试执行仍报 32 计跳过") {
   CHECK(contains(str_text, L"plain.bin：占用不可释放"));
 }
 
-TEST_CASE("run_pipeline：非 32 错误不触发强制卸载重试") {
+TEST_CASE("run_pipeline：非 32 错误不触发升级释放重试") {
   ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
   REQUIRE(tmp_dir->b_ok);
   REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"plain.bin", 8192));
@@ -948,7 +979,7 @@ TEST_CASE("run_pipeline：-u 占用不可释放计跳过不调解压器") {
   CHECK(contains(str_text, L"woflzx.bin：占用不可释放"));
 }
 
-TEST_CASE("run_pipeline：-u 占用经强制卸载后解压") {
+TEST_CASE("run_pipeline：-u 占用经升级释放后解压") {
   ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
   REQUIRE(tmp_dir->b_ok);
   REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"woflzx.bin", 8192));

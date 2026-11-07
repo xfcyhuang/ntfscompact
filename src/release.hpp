@@ -16,10 +16,8 @@ struct ReleaseOutcome {
   Level e_level{Level::kNone};
   std::vector<ClosedProcess> vec_closed{};
   std::wstring str_detail{};
-  bool b_dismounted{false};
 };
 
-using DismountFn = std::function<bool(const std::wstring& str_long_path)>;
 using ReleaseFn = std::function<ReleaseOutcome(const std::wstring& str_long_path)>;
 
 struct EscalationBackoff {
@@ -30,11 +28,11 @@ struct EscalationBackoff {
 
 bool probe_file_occupied(const std::wstring& str_long_path);
 
-bool dismount_volume_for(const std::wstring& str_long_path);
-
 bool process_is_elevated();
 
 std::wstring level_display_name(ReleaseOutcome::Level e_level);
+
+std::wstring release_audit_entry(const ReleaseOutcome& ro_outcome);
 
 std::expected<ReleaseFn, std::wstring> make_escalating_releaser(
     std::vector<ReleaseFn> vec_levels, const EscalationBackoff& eb_backoff);
@@ -42,9 +40,6 @@ std::expected<ReleaseFn, std::wstring> make_escalating_releaser(
 std::expected<ReleaseFn, std::wstring> make_rm_graceful_level();
 
 std::expected<ReleaseFn, std::wstring> make_rm_force_level();
-
-std::expected<ReleaseFn, std::wstring> make_real_releaser(
-    const DismountFn& fn_dismount);
 
 std::expected<ReleaseFn, std::wstring> make_real_releaser();
 

@@ -38,11 +38,12 @@ ReleaseGate gate_release(const std::wstring& str_long_path,
     case ReleaseOutcome::Status::kFree:
       break;
     case ReleaseOutcome::Status::kReleased:
-      if (ro_release.b_dismounted) {
-        gate_result.vec_released.push_back(L"已卸载所在卷");
-      }
+      gate_result.vec_released.push_back(release_audit_entry(ro_release));
       break;
     case ReleaseOutcome::Status::kBusy:
+      if (!ro_release.vec_closed.empty()) {
+        gate_result.vec_released.push_back(release_audit_entry(ro_release));
+      }
       gate_result.b_busy = true;
       gate_result.str_busy_reason = ro_release.str_detail.empty()
                                         ? std::wstring{L"占用不可释放"}
@@ -228,7 +229,7 @@ int run_pipeline(const Options& opt_options, const DetectFn& fn_detect,
                     fr_report.er_exec.u4_error == kWin32SharingViolation) {
                   mark_busy_skip(
                       fr_report,
-                      L"占用不可释放：卷卸载后重试执行仍报占用（错误码 32）");
+                      L"占用不可释放：升级释放后重试执行仍报占用（错误码 32）");
                 }
               }
             }
