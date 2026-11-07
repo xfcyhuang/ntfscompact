@@ -24,6 +24,14 @@ int wmain(int argc, wchar_t** argv) {
     return 2;
   }
 
+  auto xe_interrupt{ntfscompact::install_interrupt_handler()};
+  if (!xe_interrupt.has_value()) {
+    ntfscompact::write_utf8(stderr,
+                            L"ntfscompact: " + std::move(xe_interrupt).error() +
+                                L"\n");
+    return 1;
+  }
+
   auto xe_detector{ntfscompact::make_real_detector()};
   if (!xe_detector.has_value()) {
     ntfscompact::write_utf8(stderr,
@@ -73,5 +81,6 @@ int wmain(int argc, wchar_t** argv) {
   }
   return ntfscompact::run_pipeline(pr_parse.opt_options, fn_detect, fn_execute,
                                    fn_uncompress, fn_release, fn_dir_flag,
-                                   stdout, stderr);
+                                   stdout, stderr,
+                                   std::move(xe_interrupt).value());
 }

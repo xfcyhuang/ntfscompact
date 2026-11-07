@@ -119,6 +119,25 @@ std::wstring read_pipe_wide(HANDLE h_read) {
   return decode_utf8(str_bytes);
 }
 
+std::wstring read_log_file(const std::wstring& str_log) {
+  HANDLE h_log{CreateFileW(ntfscompact_test::temp_long_api_path(str_log).c_str(),
+                           GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
+  if (h_log == INVALID_HANDLE_VALUE) {
+    return L"";
+  }
+  std::string str_bytes{};
+  char buf_read[4096]{};
+  DWORD u4_read{0};
+  while (ReadFile(h_log, buf_read, sizeof(buf_read), &u4_read, nullptr) &&
+         u4_read > 0) {
+    str_bytes.append(buf_read, u4_read);
+  }
+  CloseHandle(h_log);
+  return decode_utf8(str_bytes);
+}
+
 struct ToolRun {
   int i4_code{-1};
   std::wstring str_out{};
@@ -798,6 +817,85 @@ TEST_CASE("e2e_release：--force-close-all 走全链——非提权如实止步�
     CHECK(ntfscompact::probe_file_occupied(str_deep_long));
     CHECK(child_is_alive(up_child));
   }
+}
+
+TEST_CASE("e2e_interrupt：CTRL_BREAK 驱动真实 exe 两段式——退出码 3 与停止于标注行") {
+  if (GetConsoleWindow() == nullptr) {
+    REQUIRE(AllocConsole());
+  }
+  const std::wstring str_hold_exe{hold_exe_path()};
+  REQUIRE(GetFileAttributesW(str_hold_exe.c_str()) != INVALID_FILE_ATTRIBUTES);
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  const std::wstring str_free{ntfscompact_test::temp_sub(tmp_dir, L"a_free.bin")};
+  const std::wstring str_busy{ntfscompact_test::temp_sub(tmp_dir, L"b_busy.bin")};
+  const std::wstring str_late{ntfscompact_test::temp_sub(tmp_dir, L"z_late.bin")};
+  REQUIRE(write_compressible(str_free) > 0);
+  REQUIRE(write_compressible(str_busy) > 0);
+  REQUIRE(write_compressible(str_late) > 0);
+  HoldChildPtr up_child{spawn_hold(str_hold_exe, str_busy, false)};
+  REQUIRE(up_child);
+  REQUIRE(wait_file_occupied(ntfscompact_test::temp_long_api_path(str_busy)));
+
+  ntfscompact_test::TempDir tmp_log{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_log->b_ok);
+  const std::wstring str_log{ntfscompact_test::temp_sub(tmp_log, L"run.log")};
+  SECURITY_ATTRIBUTES sa_inherit{};
+  sa_inherit.nLength = sizeof(sa_inherit);
+  sa_inherit.bInheritHandle = TRUE;
+  const HANDLE h_log_write{
+      CreateFileW(ntfscompact_test::temp_long_api_path(str_log).c_str(),
+                  GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                  &sa_inherit, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr)};
+  REQUIRE(h_log_write != INVALID_HANDLE_VALUE);
+  TestHandle guard_log{h_log_write};
+  STARTUPINFOW si_start{};
+  si_start.cb = sizeof(si_start);
+  si_start.dwFlags = STARTF_USESTDHANDLES;
+  si_start.hStdInput = nullptr;
+  si_start.hStdOutput = guard_log.get();
+  si_start.hStdError = guard_log.get();
+  PROCESS_INFORMATION pi_process{};
+  const std::wstring str_cmd{
+      L"\"" + g_str_tool_path + L"\" \"" +
+      ntfscompact_test::temp_path(tmp_dir) + L"\""};
+  std::vector<wchar_t> vec_command(str_cmd.begin(), str_cmd.end());
+  vec_command.push_back(L'\0');
+  const BOOL b_started{CreateProcessW(nullptr, vec_command.data(), nullptr,
+                                      nullptr, TRUE, CREATE_NEW_PROCESS_GROUP,
+                                      nullptr, nullptr, &si_start,
+                                      &pi_process)};
+  REQUIRE(b_started);
+  TestHandle guard_process{pi_process.hProcess};
+  TestHandle guard_thread{pi_process.hThread};
+  guard_log.reset();
+
+  bool b_seen_first{false};
+  for (int i4_attempt{0}; i4_attempt < 200; ++i4_attempt) {
+    if (WaitForSingleObject(guard_process.get(), 0) != WAIT_TIMEOUT) {
+      break;
+    }
+    if (has_text(read_log_file(str_log), L"[压缩] " + str_free)) {
+      b_seen_first = true;
+      break;
+    }
+    Sleep(50);
+  }
+  REQUIRE(b_seen_first);
+
+  REQUIRE(GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pi_process.dwProcessId) !=
+          FALSE);
+  const DWORD u4_wait{WaitForSingleObject(guard_process.get(), 30000)};
+  REQUIRE_MESSAGE(u4_wait == WAIT_OBJECT_0,
+                  narrow(read_log_file(str_log)));
+  DWORD u4_exit{0};
+  REQUIRE(GetExitCodeProcess(guard_process.get(), &u4_exit) != FALSE);
+  CHECK(u4_exit == 3);
+  const std::wstring str_log_text{read_log_file(str_log)};
+  CHECK(has_text(str_log_text, L"已被 Ctrl+C 中断：停止于 " + str_busy));
+  CHECK(has_text(str_log_text, str_busy));
+  CHECK(has_text(str_log_text, L"共 2 个文件："));
+  CHECK_FALSE(has_text(str_log_text, L"z_late"));
 }
 
 int wmain(int argc, wchar_t** argv) {
