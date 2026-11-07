@@ -1476,6 +1476,39 @@ TEST_CASE("run_pipeline：实跑逐文件边界中断——在途项走完不再
   CHECK_FALSE(contains(str_text, L"停止扫描"));
 }
 
+TEST_CASE("run_pipeline：实跑首边界中断且无完成项——标注回退停止于边界待处理项") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"a_plain.bin", 8192));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"z_plain.bin", 8192));
+
+  Options opt_case{compress_options()};
+  opt_case.vec_paths.push_back(ntfscompact_test::temp_path(tmp_dir));
+  const DetectFn fn_detect{fake_detect};
+  ExecuteRecorder recorder{};
+  int i4_calls{0};
+
+  std::FILE* f_out{std::tmpfile()};
+  REQUIRE(f_out != nullptr);
+  const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
+                                 UncompressFn{}, ReleaseFn{}, DirFlagFn{}, f_out,
+                                 f_out, make_trip_poller(i4_calls, 4))};
+  const std::wstring str_text{read_all(f_out)};
+  std::fclose(f_out);
+
+  CHECK(i4_code == 3);
+  CHECK(recorder.vec_calls.empty());
+  CHECK(i4_calls == 4);
+  CHECK(contains(str_text, L"已被 Ctrl+C 中断：停止于 "));
+  const bool b_stop_at_pending{
+      contains(str_text, L"已被 Ctrl+C 中断：停止于 " +
+                             ntfscompact_test::temp_sub(tmp_dir, L"a_plain.bin")) ||
+      contains(str_text, L"已被 Ctrl+C 中断：停止于 " +
+                             ntfscompact_test::temp_sub(tmp_dir, L"z_plain.bin"))};
+  CHECK(b_stop_at_pending);
+  CHECK(contains(str_text, L"共 0 个文件：压缩 0、重压 0、解压 0、跳过 0"));
+}
+
 TEST_CASE("run_pipeline：干跑逐文件边界中断——标注停止扫描，已打印行为准") {
   ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
   REQUIRE(tmp_dir->b_ok);
