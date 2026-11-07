@@ -1,5 +1,6 @@
 #include "release.hpp"
 
+#include "handle_guard.hpp"
 #include "wof_util.hpp"
 
 #include <windows.h>
@@ -81,6 +82,312 @@ ProcessRisk classify_process_risk(const std::wstring& str_process_name) {
     return ProcessRisk::kHigh;
   }
   return ProcessRisk::kUnknown;
+}
+
+namespace {
+
+using NtQuerySystemInformationPtr =
+    LONG(WINAPI*)(ULONG, PVOID, ULONG, PULONG);
+
+constexpr ULONG kSystemExtendedHandleInformationClass{64};
+constexpr LONG kNtStatusInfoLengthMismatch{static_cast<LONG>(0xC0000004u)};
+constexpr std::size_t kHandleSnapshotInitialSlots{1u << 19};
+constexpr std::size_t kHandleSnapshotMaxSlots{1u << 27};
+
+struct SystemHandleEntryEx {
+  PVOID ptr_object{};
+  std::uintptr_t u8_pid{0};
+  std::uintptr_t u8_handle{0};
+  ULONG u4_granted_access{0};
+  USHORT u2_creator_back_trace_index{0};
+  USHORT u2_object_type_index{0};
+  ULONG u4_handle_attributes{0};
+  ULONG u4_reserved{0};
+};
+
+std::expected<std::vector<SystemHandleEntryEx>, std::wstring>
+snapshot_system_handles() {
+  HMODULE h_ntdll{LoadLibraryW(L"ntdll.dll")};
+  if (h_ntdll == nullptr) {
+    return std::unexpected(std::format(
+        L"无法加载 ntdll.dll（错误码 {}）：句柄枚举不可用", GetLastError()));
+  }
+  HmoduleGuard guard_module{h_ntdll};
+  const auto fn_query{reinterpret_cast<NtQuerySystemInformationPtr>(
+      GetProcAddress(h_ntdll, "NtQuerySystemInformation"))};
+  if (fn_query == nullptr) {
+    return std::unexpected(L"ntdll.dll 缺少 NtQuerySystemInformation 导出");
+  }
+  std::vector<std::uintptr_t> vec_slots(kHandleSnapshotInitialSlots, 0);
+  for (;;) {
+    ULONG u4_returned{0};
+    const LONG i4_status{fn_query(
+        kSystemExtendedHandleInformationClass, vec_slots.data(),
+        static_cast<ULONG>(vec_slots.size() * sizeof(std::uintptr_t)),
+        &u4_returned)};
+    if (i4_status == 0) {
+      break;
+    }
+    if (i4_status == kNtStatusInfoLengthMismatch) {
+      if (vec_slots.size() >= kHandleSnapshotMaxSlots) {
+        return std::unexpected(L"系统句柄表超出枚举上限，句柄枚举止步");
+      }
+      vec_slots.resize(vec_slots.size() * 2, 0);
+      continue;
+    }
+    return std::unexpected(std::format(
+        L"系统句柄表枚举失败（NTSTATUS 0x{:08X}）",
+        static_cast<unsigned int>(i4_status)));
+  }
+  std::vector<SystemHandleEntryEx> vec_entries{};
+  if (vec_slots.size() < 2) {
+    return vec_entries;
+  }
+  const std::size_t u8_count{vec_slots[0]};
+  const std::size_t u8_slots_per_entry{sizeof(SystemHandleEntryEx) /
+                                       sizeof(std::uintptr_t)};
+  const std::size_t u8_capacity{
+      (vec_slots.size() - 2) / u8_slots_per_entry};
+  vec_entries.reserve(std::min(u8_count, u8_capacity));
+  const auto* ptr_first{
+      reinterpret_cast<const SystemHandleEntryEx*>(vec_slots.data() + 2)};
+  for (std::size_t u8_index{0};
+       u8_index < u8_count && u8_index < u8_capacity; ++u8_index) {
+    vec_entries.push_back(ptr_first[u8_index]);
+  }
+  return vec_entries;
+}
+
+std::wstring query_final_path(HANDLE h_file) {
+  DWORD u4_len{512};
+  std::wstring str_path(u4_len, L'\0');
+  for (;;) {
+    const DWORD u4_got{GetFinalPathNameByHandleW(
+        h_file, str_path.data(), u4_len,
+        FILE_NAME_NORMALIZED | VOLUME_NAME_DOS)};
+    if (u4_got == 0) {
+      return {};
+    }
+    if (u4_got < u4_len) {
+      str_path.resize(u4_got);
+      return str_path;
+    }
+    u4_len = u4_got;
+    str_path.resize(u4_len);
+  }
+}
+
+bool same_file_path(const std::wstring& str_left,
+                    const std::wstring& str_right) {
+  return lowercase_name(str_left) == lowercase_name(str_right);
+}
+
+std::wstring query_process_image_name(std::uint32_t u4_pid) {
+  HANDLE h_proc{
+      OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, u4_pid)};
+  if (h_proc == nullptr) {
+    return {};
+  }
+  HandlePtr up_proc{h_proc};
+  DWORD u4_len{1024};
+  std::wstring str_path(u4_len, L'\0');
+  if (!QueryFullProcessImageNameW(h_proc, 0, str_path.data(), &u4_len)) {
+    return {};
+  }
+  str_path.resize(u4_len);
+  const std::size_t u8_slash{str_path.find_last_of(L"\\")};
+  return u8_slash == std::wstring::npos ? str_path
+                                        : str_path.substr(u8_slash + 1);
+}
+
+bool close_remote_file_handle(std::uint32_t u4_pid, std::uintptr_t u8_handle) {
+  HANDLE h_proc{OpenProcess(PROCESS_DUP_HANDLE, FALSE, u4_pid)};
+  if (h_proc == nullptr) {
+    return false;
+  }
+  HandlePtr up_proc{h_proc};
+  HANDLE h_dup{nullptr};
+  const BOOL b_ok{DuplicateHandle(
+      h_proc, reinterpret_cast<HANDLE>(u8_handle), GetCurrentProcess(),
+      &h_dup, 0, FALSE, DUPLICATE_CLOSE_SOURCE | DUPLICATE_SAME_ACCESS)};
+  if (b_ok == FALSE) {
+    return false;
+  }
+  if (h_dup != nullptr) {
+    CloseHandle(h_dup);
+  }
+  return true;
+}
+
+std::vector<HandleOwner> find_target_file_handles(
+    const std::wstring& str_long_path) {
+  auto xe_entries{snapshot_system_handles()};
+  if (!xe_entries.has_value()) {
+    return {};
+  }
+  const std::vector<SystemHandleEntryEx>& vec_entries{xe_entries.value()};
+  const std::uint32_t u4_self{GetCurrentProcessId()};
+  std::map<std::uint32_t, HANDLE> map_proc{};
+  std::vector<HandleOwner> vec_owners{};
+  for (const SystemHandleEntryEx& he_entry : vec_entries) {
+    if (he_entry.u8_pid == 0 || he_entry.u8_pid == u4_self) {
+      continue;
+    }
+    if (he_entry.u8_handle == 0) {
+      continue;
+    }
+    const auto u4_pid{static_cast<std::uint32_t>(he_entry.u8_pid)};
+    const auto it_proc{map_proc.find(u4_pid)};
+    HANDLE h_proc{nullptr};
+    if (it_proc != map_proc.end()) {
+      h_proc = it_proc->second;
+    } else {
+      h_proc = OpenProcess(PROCESS_DUP_HANDLE, FALSE, u4_pid);
+      map_proc.emplace(u4_pid, h_proc);
+    }
+    if (h_proc == nullptr) {
+      continue;
+    }
+    HANDLE h_dup{nullptr};
+    if (DuplicateHandle(h_proc, reinterpret_cast<HANDLE>(he_entry.u8_handle),
+                        GetCurrentProcess(), &h_dup, 0, FALSE,
+                        DUPLICATE_SAME_ACCESS) == FALSE) {
+      continue;
+    }
+    if (h_dup == nullptr) {
+      continue;
+    }
+    HandlePtr up_dup{h_dup};
+    if (GetFileType(h_dup) != FILE_TYPE_DISK) {
+      continue;
+    }
+    const std::wstring str_final{query_final_path(h_dup)};
+    if (str_final.empty() || !same_file_path(str_final, str_long_path)) {
+      continue;
+    }
+    vec_owners.push_back(HandleOwner{u4_pid, he_entry.u8_handle});
+  }
+  for (auto& [u4_pid, h_proc] : map_proc) {
+    if (h_proc != nullptr) {
+      CloseHandle(h_proc);
+    }
+  }
+  return vec_owners;
+}
+
+std::vector<std::uint32_t> ordered_owner_pids(
+    const std::vector<HandleOwner>& vec_owners) {
+  std::vector<std::uint32_t> vec_pids{};
+  for (const HandleOwner& ho_owner : vec_owners) {
+    if (std::find(vec_pids.begin(), vec_pids.end(), ho_owner.u4_pid) ==
+        vec_pids.end()) {
+      vec_pids.push_back(ho_owner.u4_pid);
+    }
+  }
+  return vec_pids;
+}
+
+std::wstring join_gate_skips(const std::vector<std::wstring>& vec_names) {
+  std::wstring str_joined{};
+  for (std::size_t u8_index{0}; u8_index < vec_names.size(); ++u8_index) {
+    if (u8_index > 0) {
+      str_joined += L"、";
+    }
+    str_joined += vec_names[u8_index];
+  }
+  return str_joined;
+}
+
+}
+
+ReleaseFn make_handle_force_level(bool b_allow_all,
+                                  const HandleForceDeps& deps) {
+  return [b_allow_all, deps](const std::wstring& str_long_path)
+             -> ReleaseOutcome {
+    const std::function<bool()> fn_is_elevated{
+        deps.fn_is_elevated
+            ? deps.fn_is_elevated
+            : std::function<bool()>{[] { return process_is_elevated(); }}};
+    const std::function<std::vector<HandleOwner>(const std::wstring&)>
+        fn_find_handles{
+            deps.fn_find_handles
+                ? deps.fn_find_handles
+                : std::function<std::vector<HandleOwner>(const std::wstring&)>{
+                      [](const std::wstring& str_path) {
+                        return find_target_file_handles(str_path);
+                      }}};
+    const std::function<std::wstring(std::uint32_t)> fn_process_name{
+        deps.fn_process_name
+            ? deps.fn_process_name
+            : std::function<std::wstring(std::uint32_t)>{
+                  [](std::uint32_t u4_pid) {
+                    return query_process_image_name(u4_pid);
+                  }}};
+    const std::function<bool(std::uint32_t, std::uintptr_t)> fn_close_handle{
+        deps.fn_close_handle
+            ? deps.fn_close_handle
+            : std::function<bool(std::uint32_t, std::uintptr_t)>{
+                  [](std::uint32_t u4_pid, std::uintptr_t u8_handle) {
+                    return close_remote_file_handle(u4_pid, u8_handle);
+                  }}};
+
+    ReleaseOutcome ro_busy{};
+    ro_busy.e_status = ReleaseOutcome::Status::kBusy;
+    ro_busy.e_level = ReleaseOutcome::Level::kHandle;
+    if (!fn_is_elevated()) {
+      ro_busy.str_detail = L"句柄强关需管理员权限，当前非提权，本级止步";
+      return ro_busy;
+    }
+    const std::vector<HandleOwner> vec_owners{fn_find_handles(str_long_path)};
+    const std::vector<std::uint32_t> vec_pids{ordered_owner_pids(vec_owners)};
+    std::vector<ClosedProcess> vec_closed{};
+    std::vector<std::wstring> vec_gate_skipped{};
+    for (const std::uint32_t u4_pid : vec_pids) {
+      if (u4_pid == GetCurrentProcessId()) {
+        continue;
+      }
+      const std::wstring str_name{fn_process_name(u4_pid)};
+      if (str_name.empty()) {
+        continue;
+      }
+      if (!b_allow_all &&
+          classify_process_risk(str_name) != ProcessRisk::kLow) {
+        vec_gate_skipped.push_back(str_name);
+        continue;
+      }
+      bool b_closed_any{false};
+      for (const HandleOwner& ho_owner : vec_owners) {
+        if (ho_owner.u4_pid != u4_pid) {
+          continue;
+        }
+        if (fn_close_handle(u4_pid, ho_owner.u8_handle)) {
+          b_closed_any = true;
+        }
+      }
+      if (b_closed_any) {
+        vec_closed.push_back(ClosedProcess{u4_pid, str_name});
+      }
+    }
+    const bool b_still_occupied{probe_file_occupied(str_long_path)};
+    if (!vec_closed.empty() && !b_still_occupied) {
+      ReleaseOutcome ro_released{};
+      ro_released.e_status = ReleaseOutcome::Status::kReleased;
+      ro_released.e_level = ReleaseOutcome::Level::kHandle;
+      ro_released.vec_closed = vec_closed;
+      ro_released.str_detail = L"经句柄强关释放";
+      return ro_released;
+    }
+    std::wstring str_detail{b_still_occupied
+                                ? std::wstring{L"句柄强关后文件仍被占用"}
+                                : std::wstring{L"句柄强关未关到目标句柄"}};
+    if (!vec_gate_skipped.empty()) {
+      str_detail += L"（闸门跳过：" + join_gate_skips(vec_gate_skipped) +
+                    L"；可用 --force-close-all 放行）";
+    }
+    ro_busy.str_detail = str_detail;
+    ro_busy.vec_closed = vec_closed;
+    return ro_busy;
+  };
 }
 
 namespace {

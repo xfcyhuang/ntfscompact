@@ -168,6 +168,38 @@ bool write_compressible(const std::wstring& str_long_path) {
   return b_ok;
 }
 
+struct HandleCloseCall {
+  std::uint32_t u4_pid{0};
+  std::uintptr_t u8_handle{0};
+};
+
+struct FakeHandleDeps {
+  bool b_elevated{true};
+  std::vector<ntfscompact::HandleOwner> vec_owners{};
+  std::vector<std::wstring> vec_find_calls{};
+  std::vector<HandleCloseCall> vec_close_calls{};
+  std::map<std::uint32_t, std::wstring> map_names{};
+
+  ntfscompact::HandleForceDeps deps() {
+    ntfscompact::HandleForceDeps deps_out{};
+    deps_out.fn_is_elevated = [this] { return b_elevated; };
+    deps_out.fn_find_handles = [this](const std::wstring& str_long_path) {
+      vec_find_calls.push_back(str_long_path);
+      return vec_owners;
+    };
+    deps_out.fn_process_name = [this](std::uint32_t u4_pid) {
+      const auto it_find{map_names.find(u4_pid)};
+      return it_find != map_names.end() ? it_find->second : std::wstring{};
+    };
+    deps_out.fn_close_handle = [this](std::uint32_t u4_pid,
+                                      std::uintptr_t u8_handle) {
+      vec_close_calls.push_back({u4_pid, u8_handle});
+      return true;
+    };
+    return deps_out;
+  }
+};
+
 }
 
 TEST_CASE("classify_process_risk：低风险占用者入表") {
@@ -506,6 +538,180 @@ TEST_CASE("make_real_releaser：优雅关未生效自然升级强制关") {
   DWORD u4_code{0};
   CHECK(wait_child_exit(up_child->h_process, 40000, u4_code));
   CHECK_FALSE(ntfscompact::probe_file_occupied(str_file));
+}
+
+TEST_CASE("make_handle_force_level：非提权直接止步并如实报告，不做枚举") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  const std::wstring str_file{ntfscompact_test::temp_long_api_path(
+      ntfscompact_test::temp_sub(tmp_dir, L"held.bin"))};
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"held.bin", 8192));
+
+  FakeHandleDeps fake_deps{};
+  fake_deps.b_elevated = false;
+  fake_deps.vec_owners = {{4321, 100}};
+  const auto fn_level{
+      ntfscompact::make_handle_force_level(false, fake_deps.deps())};
+  const ntfscompact::ReleaseOutcome ro_outcome{fn_level(str_file)};
+
+  CHECK(ro_outcome.e_status == ntfscompact::ReleaseOutcome::Status::kBusy);
+  CHECK(ro_outcome.e_level == ntfscompact::ReleaseOutcome::Level::kHandle);
+  CHECK(ro_outcome.vec_closed.empty());
+  CHECK(ro_outcome.str_detail.find(L"管理员") != std::wstring::npos);
+  CHECK(fake_deps.vec_find_calls.empty());
+  CHECK(fake_deps.vec_close_calls.empty());
+}
+
+TEST_CASE("make_handle_force_level：默认闸门只关低风险占用者，高风险跳过并提示") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  const std::wstring str_file{ntfscompact_test::temp_long_api_path(
+      ntfscompact_test::temp_sub(tmp_dir, L"held.bin"))};
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"held.bin", 8192));
+  HANDLE h_lock{CreateFileW(str_file.c_str(), GENERIC_READ, 0, nullptr,
+                            OPEN_EXISTING, 0, nullptr)};
+  REQUIRE(h_lock != INVALID_HANDLE_VALUE);
+
+  FakeHandleDeps fake_deps{};
+  fake_deps.vec_owners = {{101, 11}, {202, 22}, {101, 12}};
+  fake_deps.map_names = {{101, L"SearchIndexer.exe"}, {202, L"explorer.exe"}};
+  const auto fn_level{
+      ntfscompact::make_handle_force_level(false, fake_deps.deps())};
+  const ntfscompact::ReleaseOutcome ro_outcome{fn_level(str_file)};
+  CloseHandle(h_lock);
+
+  CHECK(ro_outcome.e_status == ntfscompact::ReleaseOutcome::Status::kBusy);
+  CHECK(ro_outcome.e_level == ntfscompact::ReleaseOutcome::Level::kHandle);
+  REQUIRE(fake_deps.vec_close_calls.size() == 2);
+  CHECK(fake_deps.vec_close_calls[0].u4_pid == 101);
+  CHECK(fake_deps.vec_close_calls[0].u8_handle == 11);
+  CHECK(fake_deps.vec_close_calls[1].u4_pid == 101);
+  CHECK(fake_deps.vec_close_calls[1].u8_handle == 12);
+  CHECK(ro_outcome.vec_closed.size() == 1);
+  CHECK(ro_outcome.vec_closed[0].u4_pid == 101);
+  CHECK(ro_outcome.vec_closed[0].str_name == L"SearchIndexer.exe");
+  CHECK(ro_outcome.str_detail.find(L"explorer.exe") != std::wstring::npos);
+  CHECK(ro_outcome.str_detail.find(L"--force-close-all") != std::wstring::npos);
+}
+
+TEST_CASE("make_handle_force_level：--force-close-all 放行全部占用者") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  const std::wstring str_file{ntfscompact_test::temp_long_api_path(
+      ntfscompact_test::temp_sub(tmp_dir, L"held.bin"))};
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"held.bin", 8192));
+  HANDLE h_lock{CreateFileW(str_file.c_str(), GENERIC_READ, 0, nullptr,
+                            OPEN_EXISTING, 0, nullptr)};
+  REQUIRE(h_lock != INVALID_HANDLE_VALUE);
+
+  FakeHandleDeps fake_deps{};
+  fake_deps.vec_owners = {{101, 11}, {202, 22}};
+  fake_deps.map_names = {{101, L"SearchIndexer.exe"}, {202, L"explorer.exe"}};
+  const auto fn_level{
+      ntfscompact::make_handle_force_level(true, fake_deps.deps())};
+  const ntfscompact::ReleaseOutcome ro_outcome{fn_level(str_file)};
+  CloseHandle(h_lock);
+
+  CHECK(fake_deps.vec_close_calls.size() == 2);
+  CHECK(fake_deps.vec_close_calls[0].u4_pid == 101);
+  CHECK(fake_deps.vec_close_calls[1].u4_pid == 202);
+  CHECK(ro_outcome.vec_closed.size() == 2);
+  CHECK(ro_outcome.str_detail.find(L"闸门") == std::wstring::npos);
+}
+
+TEST_CASE("make_handle_force_level：低风险强关后文件释放报成功带审计") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  const std::wstring str_file{ntfscompact_test::temp_long_api_path(
+      ntfscompact_test::temp_sub(tmp_dir, L"held.bin"))};
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"held.bin", 8192));
+
+  FakeHandleDeps fake_deps{};
+  fake_deps.vec_owners = {{303, 33}};
+  fake_deps.map_names = {{303, L"searchfilterhost.exe"}};
+  const auto fn_level{
+      ntfscompact::make_handle_force_level(false, fake_deps.deps())};
+  const ntfscompact::ReleaseOutcome ro_outcome{fn_level(str_file)};
+
+  CHECK(ro_outcome.e_status == ntfscompact::ReleaseOutcome::Status::kReleased);
+  CHECK(ro_outcome.e_level == ntfscompact::ReleaseOutcome::Level::kHandle);
+  REQUIRE(ro_outcome.vec_closed.size() == 1);
+  CHECK(ro_outcome.vec_closed[0].u4_pid == 303);
+  CHECK(ro_outcome.vec_closed[0].str_name == L"searchfilterhost.exe");
+  CHECK_FALSE(ro_outcome.str_detail.empty());
+}
+
+TEST_CASE("make_handle_force_level：进程名取不到即自然止步不崩") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  const std::wstring str_file{ntfscompact_test::temp_long_api_path(
+      ntfscompact_test::temp_sub(tmp_dir, L"held.bin"))};
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"held.bin", 8192));
+  HANDLE h_lock{CreateFileW(str_file.c_str(), GENERIC_READ, 0, nullptr,
+                            OPEN_EXISTING, 0, nullptr)};
+  REQUIRE(h_lock != INVALID_HANDLE_VALUE);
+
+  FakeHandleDeps fake_deps{};
+  fake_deps.vec_owners = {{404, 44}, {505, 55}};
+  fake_deps.map_names = {{404, L""}, {505, L"msmpeng.exe"}};
+  const auto fn_level{
+      ntfscompact::make_handle_force_level(false, fake_deps.deps())};
+  const ntfscompact::ReleaseOutcome ro_outcome{fn_level(str_file)};
+  CloseHandle(h_lock);
+
+  CHECK(ro_outcome.e_status == ntfscompact::ReleaseOutcome::Status::kBusy);
+  REQUIRE(fake_deps.vec_close_calls.size() == 1);
+  CHECK(fake_deps.vec_close_calls[0].u4_pid == 505);
+  CHECK(ro_outcome.vec_closed.size() == 1);
+  CHECK(ro_outcome.vec_closed[0].u4_pid == 505);
+}
+
+TEST_CASE("make_handle_force_level：句柄关不动（拒绝访问）自然止步不报已关") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  const std::wstring str_file{ntfscompact_test::temp_long_api_path(
+      ntfscompact_test::temp_sub(tmp_dir, L"held.bin"))};
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"held.bin", 8192));
+  HANDLE h_lock{CreateFileW(str_file.c_str(), GENERIC_READ, 0, nullptr,
+                            OPEN_EXISTING, 0, nullptr)};
+  REQUIRE(h_lock != INVALID_HANDLE_VALUE);
+
+  FakeHandleDeps fake_deps{};
+  fake_deps.vec_owners = {{606, 66}};
+  fake_deps.map_names = {{606, L"lsass.exe"}};
+  ntfscompact::HandleForceDeps deps_handle{fake_deps.deps()};
+  deps_handle.fn_close_handle = [](std::uint32_t, std::uintptr_t) {
+    return false;
+  };
+  const auto fn_level{ntfscompact::make_handle_force_level(true, deps_handle)};
+  const ntfscompact::ReleaseOutcome ro_outcome{fn_level(str_file)};
+  CloseHandle(h_lock);
+
+  CHECK(ro_outcome.e_status == ntfscompact::ReleaseOutcome::Status::kBusy);
+  CHECK(ro_outcome.vec_closed.empty());
+  CHECK(ro_outcome.str_detail.find(L"句柄强关") != std::wstring::npos);
+}
+
+TEST_CASE("make_handle_force_level：自身 PID 句柄被过滤不强关自己") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  const std::wstring str_file{ntfscompact_test::temp_long_api_path(
+      ntfscompact_test::temp_sub(tmp_dir, L"held.bin"))};
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"held.bin", 8192));
+  HANDLE h_lock{CreateFileW(str_file.c_str(), GENERIC_READ, 0, nullptr,
+                            OPEN_EXISTING, 0, nullptr)};
+  REQUIRE(h_lock != INVALID_HANDLE_VALUE);
+
+  FakeHandleDeps fake_deps{};
+  fake_deps.vec_owners = {{GetCurrentProcessId(), 77}};
+  const auto fn_level{
+      ntfscompact::make_handle_force_level(true, fake_deps.deps())};
+  const ntfscompact::ReleaseOutcome ro_outcome{fn_level(str_file)};
+  CloseHandle(h_lock);
+
+  CHECK(fake_deps.vec_close_calls.empty());
+  CHECK(ro_outcome.vec_closed.empty());
+  CHECK(ro_outcome.e_status == ntfscompact::ReleaseOutcome::Status::kBusy);
 }
 
 TEST_CASE("run_pipeline：注入假释放后压缩继续") {

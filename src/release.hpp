@@ -34,6 +34,22 @@ enum class ProcessRisk { kLow, kHigh, kUnknown };
 
 ProcessRisk classify_process_risk(const std::wstring& str_process_name);
 
+struct HandleOwner {
+  std::uint32_t u4_pid{0};
+  std::uintptr_t u8_handle{0};
+};
+
+struct HandleForceDeps {
+  std::function<bool()> fn_is_elevated{};
+  std::function<std::vector<HandleOwner>(const std::wstring&)>
+      fn_find_handles{};
+  std::function<std::wstring(std::uint32_t)> fn_process_name{};
+  std::function<bool(std::uint32_t, std::uintptr_t)> fn_close_handle{};
+};
+
+ReleaseFn make_handle_force_level(bool b_allow_all,
+                                  const HandleForceDeps& deps = {});
+
 std::wstring level_display_name(ReleaseOutcome::Level e_level);
 
 std::wstring release_audit_entry(const ReleaseOutcome& ro_outcome);
