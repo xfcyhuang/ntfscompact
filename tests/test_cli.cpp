@@ -223,3 +223,14 @@ TEST_CASE("用法文本覆盖全部选项与算法取值") {
   CHECK(str_usage.find(L"--version") != std::wstring::npos);
 }
 
+TEST_CASE("用法文本说明中断两段式协议与退出码 3 及内核卡死不可救") {
+  const std::wstring str_usage{ntfscompact::usage_text()};
+  CHECK(str_usage.find(L"Ctrl+C") != std::wstring::npos);
+  CHECK(str_usage.find(L"当前项边界停机") != std::wstring::npos);
+  CHECK(str_usage.find(L"升级链全程") != std::wstring::npos);
+  CHECK(str_usage.find(L"部分汇总") != std::wstring::npos);
+  CHECK(str_usage.find(L"再次事件立即强制退出") != std::wstring::npos);
+  CHECK(str_usage.find(L"无法中断，无解") != std::wstring::npos);
+  CHECK(str_usage.find(L"3 已被 Ctrl+C 中断") != std::wstring::npos);
+}
+
