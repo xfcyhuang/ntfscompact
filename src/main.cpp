@@ -31,6 +31,8 @@ int wmain(int argc, wchar_t** argv) {
                                 L"\n");
     return 1;
   }
+  const ntfscompact::InterruptWiring wiring_interrupt{
+      std::move(xe_interrupt).value()};
 
   auto xe_detector{ntfscompact::make_real_detector()};
   if (!xe_detector.has_value()) {
@@ -79,8 +81,11 @@ int wmain(int argc, wchar_t** argv) {
     }
     fn_dir_flag = std::move(xe_dir_flag_clearer).value();
   }
-  return ntfscompact::run_pipeline(pr_parse.opt_options, fn_detect, fn_execute,
-                                   fn_uncompress, fn_release, fn_dir_flag,
-                                   stdout, stderr,
-                                   std::move(xe_interrupt).value());
+  const int i4_exit{ntfscompact::run_pipeline(
+      pr_parse.opt_options, fn_detect, fn_execute, fn_uncompress, fn_release,
+      fn_dir_flag, stdout, stderr, wiring_interrupt.fn_poll)};
+  if (wiring_interrupt.fn_wrapup_complete) {
+    wiring_interrupt.fn_wrapup_complete();
+  }
+  return i4_exit;
 }
