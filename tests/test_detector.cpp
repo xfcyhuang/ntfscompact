@@ -58,6 +58,16 @@ TEST_CASE("make_real_detector：wofutil.dll 动态加载成功") {
   REQUIRE(xe_detector.has_value());
 }
 
+TEST_CASE("make_real_detector：wofutil 加载失败注入 → unexpected 上抛启动即败") {
+  auto xe_detector{make_real_detector(
+      std::unexpected(std::wstring{L"wofutil.dll 缺少导出 WofIsExternalFile"}))};
+  REQUIRE_FALSE(xe_detector.has_value());
+  const std::string str_error{narrow(xe_detector.error())};
+  CHECK(str_error.find("wofutil.dll") != std::string::npos);
+  CHECK(str_error.find("WOF 现状检测不可用") != std::string::npos);
+  CHECK(str_error.find("工具终止") != std::string::npos);
+}
+
 TEST_CASE("make_real_detector：普通文件 → 未压缩（None）") {
   ntfscompact_test::TempDir tmp{ntfscompact_test::make_temp_dir()};
   REQUIRE(tmp->b_ok);

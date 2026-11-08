@@ -1,5 +1,6 @@
 #include "detect.hpp"
 
+#include "dynload.hpp"
 #include "wof_util.hpp"
 
 #include <windows.h>
@@ -15,7 +16,6 @@ namespace {
 constexpr USHORT kFormatNone{0};
 
 struct DetectorContext {
-  HmoduleGuard guard_module{};
   std::function<ULONG WINAPI(LPCWSTR, PBOOL, PULONG, PVOID, PULONG)>
       fn_is_external{};
 };
@@ -72,28 +72,24 @@ DetectionResult detect_with(const DetectorContext& ctx_detector,
 
 }
 
-auto make_real_detector() -> std::expected<DetectFn, std::wstring> {
-  auto xe_module{load_wofutil_module()};
-  if (!xe_module.has_value()) {
+auto make_real_detector(std::expected<WofApi, std::wstring> xe_api)
+    -> std::expected<DetectFn, std::wstring> {
+  if (!xe_api.has_value()) {
     return std::unexpected(std::format(
-        L"无法加载 wofutil.dll（错误码 {}）：WOF 现状检测不可用，工具终止。"
+        L"{}：WOF 现状检测不可用，工具终止。"
         L"该 DLL 为 Windows 10+ 系统组件，请确认系统完整性。",
-        std::move(xe_module).error()));
-  }
-  HmoduleGuard guard_module{std::move(xe_module).value()};
-  FARPROC ptr_is{GetProcAddress(guard_module.get(), "WofIsExternalFile")};
-  if (ptr_is == nullptr) {
-    return std::unexpected(std::format(
-        L"wofutil.dll 中未找到 WofIsExternalFile 导出（错误码 {}）：无法检测 WOF 现状。",
-        GetLastError()));
+        std::move(xe_api).error()));
   }
   auto sp_ctx{std::make_shared<DetectorContext>()};
-  sp_ctx->guard_module = std::move(guard_module);
-  sp_ctx->fn_is_external = reinterpret_cast<WofIsExternalFilePtr>(ptr_is);
+  sp_ctx->fn_is_external = std::move(xe_api).value().fn_is_external;
   return DetectFn{[sp_ctx = std::move(sp_ctx)](
                       const std::wstring& str_long_path) {
     return detect_with(*sp_ctx, str_long_path);
   }};
+}
+
+auto make_real_detector() -> std::expected<DetectFn, std::wstring> {
+  return make_real_detector(load_wof_api());
 }
 
 }

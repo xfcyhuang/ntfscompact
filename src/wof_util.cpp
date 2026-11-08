@@ -30,12 +30,4 @@ ULONG to_wof_algorithm(Algorithm e_algorithm) {
   return kWofAlgoXpress8k;
 }
 
-std::expected<HmoduleGuard, DWORD> load_wofutil_module() {
-  HMODULE h_module{LoadLibraryW(L"wofutil.dll")};
-  if (h_module == nullptr) {
-    return std::unexpected(GetLastError());
-  }
-  return HmoduleGuard{h_module};
-}
-
 }
