@@ -23,11 +23,13 @@ ntfscompact::Options make_options(ntfscompact::Algorithm e_algorithm,
 
 using ntfscompact::Algorithm;
 using ntfscompact::CurrentState;
+using ntfscompact::DirFlagReport;
 using ntfscompact::FileReport;
 using ntfscompact::PipelineResult;
 using ntfscompact::Plan;
 using ntfscompact::collect_byte_stats;
 using ntfscompact::decide_action;
+using ntfscompact::format_dir_flag_line;
 using ntfscompact::format_report_line;
 using ntfscompact::format_summary;
 
@@ -215,4 +217,68 @@ TEST_CASE("报告行：检测失败项输出失败行") {
   fr_report.str_error = L"现状检测失败（模拟）";
   CHECK(narrow(format_report_line(fr_report, make_options(Algorithm::kXpress8k))) ==
         "[失败] C:\\d\\x.bin：现状检测失败（模拟）");
+}
+
+TEST_CASE("目录标记行：干跑、实跑与失败措辞") {
+  const ntfscompact::Options opt_real{make_options(Algorithm::kXpress8k)};
+  ntfscompact::Options opt_dry{make_options(Algorithm::kXpress8k)};
+  opt_dry.b_dry_run = true;
+
+  SUBCASE("干跑：将清除标记") {
+    DirFlagReport df_report{};
+    df_report.str_display_path = L"C:\\d\\sub";
+    CHECK(narrow(format_dir_flag_line(df_report, opt_dry)) ==
+          "[目录标记] C:\\d\\sub：将清除标记");
+  }
+  SUBCASE("实跑成功：已清除标记") {
+    DirFlagReport df_report{};
+    df_report.str_display_path = L"C:\\d\\sub";
+    df_report.b_cleared = true;
+    CHECK(narrow(format_dir_flag_line(df_report, opt_real)) ==
+          "[目录标记] C:\\d\\sub：已清除标记");
+  }
+  SUBCASE("失败：错误行带清除器错误消息") {
+    DirFlagReport df_report{};
+    df_report.str_display_path = L"C:\\d\\sub";
+    df_report.str_error = L"无法打开目录（错误码 5）";
+    CHECK(narrow(format_dir_flag_line(df_report, opt_real)) ==
+          "[失败] C:\\d\\sub：无法打开目录（错误码 5）");
+  }
+}
+
+TEST_CASE("汇总行：目录标记计数段追加尾部") {
+  SUBCASE("干跑：将清除目录标记 N 个") {
+    PipelineResult pl_result{};
+    DirFlagReport df_first{};
+    df_first.str_display_path = L"C:\\d\\a";
+    DirFlagReport df_second{};
+    df_second.str_display_path = L"C:\\d\\b";
+    pl_result.vec_dir_flags.push_back(df_first);
+    pl_result.vec_dir_flags.push_back(df_second);
+    ntfscompact::Options opt_dry{make_options(Algorithm::kXpress8k)};
+    opt_dry.b_dry_run = true;
+    CHECK(narrow(format_summary(pl_result, opt_dry)) ==
+          "共 0 个文件：压缩 0、重压 0、解压 0、跳过 0；将清除目录标记 2 个");
+  }
+  SUBCASE("实跑：已清除目录标记仅计成功，失败计入失败段") {
+    PipelineResult pl_result{};
+    DirFlagReport df_ok{};
+    df_ok.str_display_path = L"C:\\d\\a";
+    df_ok.b_cleared = true;
+    DirFlagReport df_fail{};
+    df_fail.str_display_path = L"C:\\d\\b";
+    df_fail.str_error = L"无法打开目录（错误码 5）";
+    pl_result.vec_dir_flags.push_back(df_ok);
+    pl_result.vec_dir_flags.push_back(df_fail);
+    pl_result.i4_failures = 1;
+    CHECK(narrow(format_summary(pl_result, make_options(Algorithm::kXpress8k))) ==
+          "共 0 个文件：压缩 0、重压 0、解压 0、跳过 0；失败 1；已清除目录标记 1 个");
+  }
+  SUBCASE("无标记目录零计数段") {
+    PipelineResult pl_result{};
+    CHECK(narrow(format_summary(pl_result, make_options(Algorithm::kXpress8k))) ==
+          "共 0 个文件：压缩 0、重压 0、解压 0、跳过 0");
+    CHECK_FALSE(narrow(format_summary(pl_result, make_options(Algorithm::kXpress8k)))
+                    .find("目录标记") != std::string::npos);
+  }
 }

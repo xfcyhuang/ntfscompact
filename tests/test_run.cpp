@@ -2,8 +2,10 @@
 #include "doctest.h"
 
 #include "pipeline.hpp"
+#include "interrupt.hpp"
 #include "release.hpp"
 #include "temp_dir.hpp"
+#include "util.hpp"
 
 #include <windows.h>
 
@@ -12,16 +14,21 @@ namespace {
 using ntfscompact::Algorithm;
 using ntfscompact::CurrentState;
 using ntfscompact::DetectionResult;
+using ntfscompact::DirFlagFn;
 using ntfscompact::ExecuteFn;
 using ntfscompact::ExecuteResult;
 using ntfscompact::FileReport;
+using ntfscompact::FlaggedDir;
 using ntfscompact::DetectFn;
+using ntfscompact::InterruptPoller;
 using ntfscompact::Options;
-using ntfscompact::PipelineResult;
 using ntfscompact::Plan;
 using ntfscompact::ReleaseFn;
 using ntfscompact::run_pipeline;
 using ntfscompact::run_scan;
+using ntfscompact::ScanItem;
+using ntfscompact::ScanOutcome;
+using ntfscompact::ScanSkip;
 using ntfscompact::UncompressFn;
 
 DetectionResult fake_detect(const std::wstring& str_long_path) {
@@ -117,8 +124,9 @@ ReleaseRecorder make_release_recorder() {
   ReleaseRecorder rec_result{};
   rec_result.ro_result.e_status =
       ntfscompact::ReleaseOutcome::Status::kReleased;
-  rec_result.ro_result.b_dismounted = true;
-  rec_result.ro_result.str_detail = L"经卷卸载释放";
+  rec_result.ro_result.e_level = ntfscompact::ReleaseOutcome::Level::kRmForce;
+  rec_result.ro_result.vec_closed = {{4242, L"hold_app.exe"}};
+  rec_result.ro_result.str_detail = L"经 RM 强制关释放";
   return rec_result;
 }
 
@@ -134,8 +142,26 @@ ntfscompact::ReleaseFn make_busy_releaser(std::vector<std::wstring>& vec_calls) 
     vec_calls.push_back(str_long_path);
     ntfscompact::ReleaseOutcome ro_busy{};
     ro_busy.e_status = ntfscompact::ReleaseOutcome::Status::kBusy;
-    ro_busy.str_detail = L"占用不可释放：卷卸载失败（模拟）";
+    ro_busy.str_detail = L"占用不可释放：升级链尽后仍被占用（模拟）";
     return ro_busy;
+  };
+}
+
+struct DetectRecorder {
+  std::vector<std::wstring> vec_calls{};
+};
+
+DetectFn make_record_detector(DetectRecorder& rec_record) {
+  return [&rec_record](const std::wstring& str_long_path) {
+    rec_record.vec_calls.push_back(str_long_path);
+    return fake_detect(str_long_path);
+  };
+}
+
+InterruptPoller make_trip_poller(int& i4_calls, int i4_trip_at) {
+  return [&i4_calls, i4_trip_at]() {
+    ++i4_calls;
+    return i4_calls >= i4_trip_at;
   };
 }
 
@@ -150,16 +176,6 @@ std::wstring make_fixture(ntfscompact_test::TempDir& tmp_dir) {
   REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"failme.bin", 8192));
   REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"tiny.bin", 100));
   return ntfscompact_test::temp_path(tmp_dir);
-}
-
-const FileReport* find_report(const PipelineResult& pr_result,
-                              const wchar_t* ptr_name) {
-  for (const FileReport& fr_item : pr_result.vec_reports) {
-    if (fr_item.str_display_path.find(ptr_name) != std::wstring::npos) {
-      return &fr_item;
-    }
-  }
-  return nullptr;
 }
 
 std::wstring read_all(std::FILE* f_stream) {
@@ -201,62 +217,107 @@ bool contains(const std::wstring& str_haystack, const std::wstring& str_needle) 
 
 }
 
-TEST_CASE("run_scan：各现状文件得到正确动作（注入假检测器）") {
+TEST_CASE("run_scan：零调用 detector——枚举期不触碰检测缝") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  const std::wstring str_dir{make_fixture(tmp_dir)};
+
+  int i4_detect_calls{0};
+  const DetectFn fn_detect{[&i4_detect_calls](const std::wstring&) {
+    ++i4_detect_calls;
+    return DetectionResult{};
+  }};
+
+  Options opt_case{compress_options()};
+  opt_case.vec_paths.push_back(str_dir);
+  const ScanOutcome so_scan{run_scan(opt_case)};
+  CHECK(i4_detect_calls == 0);
+
+  REQUIRE(so_scan.vec_items.size() == 7);
+  REQUIRE(so_scan.vec_skipped.size() == 1);
+  CHECK(contains(so_scan.vec_skipped[0].str_display_path, L"tiny.bin"));
+  CHECK(contains(so_scan.vec_skipped[0].str_reason, L"4KB"));
+  CHECK(so_scan.vec_flagged_dirs.empty());
+  CHECK(so_scan.vec_errors.empty());
+  for (const ScanItem& si_item : so_scan.vec_items) {
+    CHECK(si_item.str_long_path.starts_with(L"\\\\?\\"));
+    CHECK(si_item.u8_size == 8192);
+  }
+}
+
+TEST_CASE("run_scan：枚举产物——文件项/跳过/带标记目录与旧一致") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  const std::wstring str_dir{make_fixture(tmp_dir)};
+  REQUIRE(ntfscompact_test::temp_make_dir(tmp_dir, L"marked"));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"marked\\deep.bin", 8192));
+  REQUIRE(ntfscompact_test::mark_dir(ntfscompact_test::temp_sub(tmp_dir, L"marked")));
+
+  Options opt_case{compress_options()};
+  opt_case.vec_paths.push_back(str_dir);
+  const ScanOutcome so_scan{run_scan(opt_case)};
+
+  REQUIRE(so_scan.vec_items.size() == 8);
+  REQUIRE(so_scan.vec_skipped.size() == 1);
+  REQUIRE(so_scan.vec_flagged_dirs.size() == 1);
+  CHECK(so_scan.vec_errors.empty());
+
+  bool b_has_marked{false};
+  for (const FlaggedDir& fd_flag : so_scan.vec_flagged_dirs) {
+    b_has_marked = b_has_marked || contains(fd_flag.str_display_path, L"marked");
+    CHECK(fd_flag.str_long_path.starts_with(L"\\\\?\\"));
+  }
+  CHECK(b_has_marked);
+
+  std::size_t u8_named{0};
+  for (const ScanItem& si_item : so_scan.vec_items) {
+    for (const wchar_t* ptr_name : {L"plain.bin", L"wof8k.bin", L"woflzx.bin",
+                                    L"lznt1.bin", L"wim.bin", L"cloud.bin",
+                                    L"failme.bin", L"deep.bin"}) {
+      if (si_item.str_display_path.find(ptr_name) != std::wstring::npos) {
+        ++u8_named;
+      }
+    }
+  }
+  CHECK(u8_named == 8);
+  CHECK(contains(so_scan.vec_skipped[0].str_display_path, L"tiny.bin"));
+  CHECK(contains(so_scan.vec_skipped[0].str_reason, L"4KB"));
+}
+
+TEST_CASE("run_pipeline：干跑全 fixture 计划行——黑名单跳过与检测失败行") {
   ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
   const std::wstring str_dir{make_fixture(tmp_dir)};
 
   Options opt_case{compress_options()};
+  opt_case.b_dry_run = true;
   opt_case.vec_paths.push_back(str_dir);
   const DetectFn fn_detect{fake_detect};
-  const PipelineResult pr_result{run_scan(opt_case, fn_detect)};
+  ExecuteRecorder recorder{};
 
-  REQUIRE(pr_result.vec_reports.size() == 8);
-  CHECK(pr_result.i4_failures == 1);
+  std::FILE* f_out{std::tmpfile()};
+  std::FILE* f_err{std::tmpfile()};
+  REQUIRE(f_out != nullptr);
+  REQUIRE(f_err != nullptr);
+  const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
+                                UncompressFn{}, ReleaseFn{}, DirFlagFn{}, f_out, f_err)};
+  const std::wstring str_text{read_all(f_out)};
+  const std::wstring str_err_text{read_all(f_err)};
+  std::fclose(f_out);
+  std::fclose(f_err);
 
-  const FileReport* ptr_plain{find_report(pr_result, L"plain.bin")};
-  REQUIRE(ptr_plain != nullptr);
-  CHECK(ptr_plain->str_error.empty());
-  CHECK(ptr_plain->pl_plan.e_action == Plan::Action::kCompress);
-  CHECK(ptr_plain->b_has_state);
-  CHECK(ptr_plain->cs_state.e_kind == CurrentState::Kind::kNone);
-
-  const FileReport* ptr_wof8k{find_report(pr_result, L"wof8k.bin")};
-  REQUIRE(ptr_wof8k != nullptr);
-  CHECK(ptr_wof8k->pl_plan.e_action == Plan::Action::kSkip);
-  CHECK(contains(ptr_wof8k->pl_plan.str_reason, L"指定算法"));
-
-  const FileReport* ptr_woflzx{find_report(pr_result, L"woflzx.bin")};
-  REQUIRE(ptr_woflzx != nullptr);
-  CHECK(ptr_woflzx->pl_plan.e_action == Plan::Action::kRecompress);
-  CHECK(ptr_woflzx->cs_state.e_algorithm == Algorithm::kLzx);
-
-  const FileReport* ptr_lznt1{find_report(pr_result, L"lznt1.bin")};
-  REQUIRE(ptr_lznt1 != nullptr);
-  CHECK(ptr_lznt1->pl_plan.e_action == Plan::Action::kRecompress);
-
-  const FileReport* ptr_wim{find_report(pr_result, L"wim.bin")};
-  REQUIRE(ptr_wim != nullptr);
-  CHECK(ptr_wim->pl_plan.e_action == Plan::Action::kSkip);
-  CHECK(contains(ptr_wim->pl_plan.str_reason, L"WIM"));
-
-  const FileReport* ptr_cloud{find_report(pr_result, L"cloud.bin")};
-  REQUIRE(ptr_cloud != nullptr);
-  CHECK(ptr_cloud->pl_plan.e_action == Plan::Action::kSkip);
-  CHECK(contains(ptr_cloud->pl_plan.str_reason, L"Cloud"));
-
-  const FileReport* ptr_failme{find_report(pr_result, L"failme.bin")};
-  REQUIRE(ptr_failme != nullptr);
-  CHECK_FALSE(ptr_failme->str_error.empty());
-  CHECK(contains(ptr_failme->str_error, L"现状检测失败"));
-
-  const FileReport* ptr_tiny{find_report(pr_result, L"tiny.bin")};
-  REQUIRE(ptr_tiny != nullptr);
-  CHECK(ptr_tiny->pl_plan.e_action == Plan::Action::kSkip);
-  CHECK(contains(ptr_tiny->pl_plan.str_reason, L"4KB"));
-  CHECK_FALSE(ptr_tiny->b_has_state);
+  CHECK(i4_code == 1);
+  CHECK(recorder.vec_calls.empty());
+  CHECK(contains(str_text, L"wof8k.bin：已是指定算法 xpress8k"));
+  CHECK(contains(str_text, L"woflzx.bin：现状 lzx（WOF），将重压为指定算法 xpress8k"));
+  CHECK(contains(str_text, L"lznt1.bin：现状 LZNT1，将重压为指定算法 xpress8k"));
+  CHECK(contains(str_text, L"plain.bin：现状 未压缩，将压缩为指定算法 xpress8k"));
+  CHECK(contains(str_text, L"wim.bin：WIM backing 文件（黑名单）"));
+  CHECK(contains(str_text, L"cloud.bin：Cloud backing 文件（黑名单）"));
+  CHECK(contains(str_text, L"tiny.bin：文件大小 ≤4KB"));
+  CHECK(contains(str_err_text, L"failme.bin：现状检测失败（模拟）"));
+  CHECK(contains(str_text, L"共 8 个文件：压缩 1、重压 2、解压 0、跳过 4；失败 1"));
 }
 
-TEST_CASE("run_scan：解压模式下各文件动作") {
+TEST_CASE("run_pipeline：解压模式干跑——各文件动作行") {
   ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
   REQUIRE(tmp_dir->b_ok);
   REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"plain.bin", 8192));
@@ -265,19 +326,24 @@ TEST_CASE("run_scan：解压模式下各文件动作") {
 
   Options opt_case{};
   opt_case.b_uncompress = true;
+  opt_case.b_dry_run = true;
   opt_case.vec_paths.push_back(ntfscompact_test::temp_path(tmp_dir));
   const DetectFn fn_detect{fake_detect};
-  const PipelineResult pr_result{run_scan(opt_case, fn_detect)};
+  ExecuteRecorder recorder{};
 
-  const FileReport* ptr_plain{find_report(pr_result, L"plain.bin")};
-  REQUIRE(ptr_plain != nullptr);
-  CHECK(ptr_plain->pl_plan.e_action == Plan::Action::kSkip);
-  const FileReport* ptr_woflzx{find_report(pr_result, L"woflzx.bin")};
-  REQUIRE(ptr_woflzx != nullptr);
-  CHECK(ptr_woflzx->pl_plan.e_action == Plan::Action::kUncompress);
-  const FileReport* ptr_lznt1{find_report(pr_result, L"lznt1.bin")};
-  REQUIRE(ptr_lznt1 != nullptr);
-  CHECK(ptr_lznt1->pl_plan.e_action == Plan::Action::kUncompress);
+  std::FILE* f_out{std::tmpfile()};
+  REQUIRE(f_out != nullptr);
+  const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
+                                UncompressFn{}, ReleaseFn{}, DirFlagFn{}, f_out, f_out)};
+  const std::wstring str_text{read_all(f_out)};
+  std::fclose(f_out);
+
+  CHECK(i4_code == 0);
+  CHECK(recorder.vec_calls.empty());
+  CHECK(contains(str_text, L"plain.bin：未压缩"));
+  CHECK(contains(str_text, L"woflzx.bin：现状 lzx（WOF），将解压"));
+  CHECK(contains(str_text, L"lznt1.bin：现状 LZNT1，将解压"));
+  CHECK(contains(str_text, L"共 3 个文件：压缩 0、重压 0、解压 2、跳过 1"));
 }
 
 TEST_CASE("run_pipeline：干跑输出每文件计划行与汇总，不执行，退出码 0") {
@@ -296,7 +362,7 @@ TEST_CASE("run_pipeline：干跑输出每文件计划行与汇总，不执行，
   std::FILE* f_out{std::tmpfile()};
   REQUIRE(f_out != nullptr);
   const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
-                                UncompressFn{}, ReleaseFn{}, f_out, f_out)};
+                                UncompressFn{}, ReleaseFn{}, DirFlagFn{}, f_out, f_out)};
   CHECK(i4_code == 0);
 
   const std::wstring str_text{read_all(f_out)};
@@ -310,6 +376,37 @@ TEST_CASE("run_pipeline：干跑输出每文件计划行与汇总，不执行，
   CHECK(contains(str_text, L"共 3 个文件：压缩 1、重压 1、解压 0、跳过 1"));
   CHECK_FALSE(contains(str_text, L"压缩/重压"));
   CHECK(recorder.vec_calls.empty());
+}
+
+TEST_CASE("run_pipeline：干跑遇占用文件不触发释放") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"plain.bin", 8192));
+  TestFileLock lock_file{
+      lock_test_file(ntfscompact_test::temp_long_api_path(
+          ntfscompact_test::temp_sub(tmp_dir, L"plain.bin")))};
+  REQUIRE(lock_file);
+
+  Options opt_case{compress_options()};
+  opt_case.b_dry_run = true;
+  opt_case.vec_paths.push_back(ntfscompact_test::temp_path(tmp_dir));
+  const DetectFn fn_detect{fake_detect};
+  ExecuteRecorder recorder{};
+  ReleaseRecorder rec_release{make_release_recorder()};
+
+  std::FILE* f_out{std::tmpfile()};
+  REQUIRE(f_out != nullptr);
+  const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
+                                UncompressFn{}, make_record_releaser(rec_release), DirFlagFn{},
+                                f_out, f_out)};
+  const std::wstring str_text{read_all(f_out)};
+  std::fclose(f_out);
+
+  CHECK(i4_code == 0);
+  CHECK(rec_release.vec_calls.empty());
+  CHECK(recorder.vec_calls.empty());
+  CHECK_FALSE(contains(str_text, L"升级释放"));
+  CHECK(contains(str_text, L"[压缩] "));
 }
 
 TEST_CASE("run_pipeline：真实模式执行压缩，每文件结果行与汇总落账") {
@@ -329,7 +426,7 @@ TEST_CASE("run_pipeline：真实模式执行压缩，每文件结果行与汇总
   REQUIRE(f_out != nullptr);
   REQUIRE(f_err != nullptr);
   const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
-                                UncompressFn{}, ReleaseFn{}, f_out, f_err)};
+                                UncompressFn{}, ReleaseFn{}, DirFlagFn{}, f_out, f_err)};
   CHECK(i4_code == 1);
 
   const std::wstring str_text{read_all(f_out)};
@@ -364,7 +461,7 @@ TEST_CASE("run_pipeline：真实模式重压——LZNT1 与异算法 WOF 传 Rec
   std::FILE* f_out{std::tmpfile()};
   REQUIRE(f_out != nullptr);
   run_pipeline(opt_case, fn_detect, make_record_executor(recorder), UncompressFn{},
-              ReleaseFn{}, f_out, f_out);
+              ReleaseFn{}, DirFlagFn{}, f_out, f_out);
 
   const std::wstring str_text{read_all(f_out)};
   std::fclose(f_out);
@@ -392,7 +489,7 @@ TEST_CASE("run_pipeline：真实模式失败后继续跑完后续文件") {
   REQUIRE(f_out != nullptr);
   REQUIRE(f_err != nullptr);
   run_pipeline(opt_case, fn_detect, make_record_executor(recorder), UncompressFn{},
-              ReleaseFn{}, f_out, f_err);
+              ReleaseFn{}, DirFlagFn{}, f_out, f_err);
 
   CHECK(recorder.vec_calls.size() == 2);
   const std::wstring str_text{read_all(f_out)};
@@ -423,7 +520,7 @@ TEST_CASE("run_pipeline：Skip 与解压分支分派解压执行器，不碰压�
   std::FILE* f_out{std::tmpfile()};
   REQUIRE(f_out != nullptr);
   const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
-                                fn_uncompress, ReleaseFn{}, f_out, f_out)};
+                                fn_uncompress, ReleaseFn{}, DirFlagFn{}, f_out, f_out)};
   CHECK(i4_code == 0);
   std::fclose(f_out);
   CHECK(recorder.vec_calls.empty());
@@ -451,7 +548,7 @@ TEST_CASE("run_pipeline：普通模式输出每文件结果行与汇总") {
   std::FILE* f_out{std::tmpfile()};
   REQUIRE(f_out != nullptr);
   const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
-                                UncompressFn{}, ReleaseFn{}, f_out, f_out)};
+                                UncompressFn{}, ReleaseFn{}, DirFlagFn{}, f_out, f_out)};
   CHECK(i4_code == 0);
 
   const std::wstring str_text{read_all(f_out)};
@@ -479,7 +576,7 @@ TEST_CASE("run_pipeline：失败路径计入退出码 1，失败行照打") {
   REQUIRE(f_out != nullptr);
   REQUIRE(f_err != nullptr);
   const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
-                                UncompressFn{}, ReleaseFn{}, f_out, f_err)};
+                                UncompressFn{}, ReleaseFn{}, DirFlagFn{}, f_out, f_err)};
   CHECK(i4_code == 1);
 
   const std::wstring str_err_text{read_all(f_err)};
@@ -505,7 +602,7 @@ TEST_CASE("run_pipeline：-q 仅输出汇总一行") {
   REQUIRE(f_out != nullptr);
   REQUIRE(f_err != nullptr);
   const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
-                                UncompressFn{}, ReleaseFn{}, f_out, f_err)};
+                                UncompressFn{}, ReleaseFn{}, DirFlagFn{}, f_out, f_err)};
   const std::wstring str_text{read_all(f_out)};
   const std::wstring str_err_text{read_all(f_err)};
   std::fclose(f_out);
@@ -535,7 +632,7 @@ TEST_CASE("run_pipeline：-q 失败行仍走 stderr 且退出码 1") {
   REQUIRE(f_out != nullptr);
   REQUIRE(f_err != nullptr);
   const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
-                                UncompressFn{}, ReleaseFn{}, f_out, f_err)};
+                                UncompressFn{}, ReleaseFn{}, DirFlagFn{}, f_out, f_err)};
   const std::wstring str_text{read_all(f_out)};
   const std::wstring str_err_text{read_all(f_err)};
   std::fclose(f_out);
@@ -564,7 +661,7 @@ TEST_CASE("run_pipeline：退出码边界——全部跳过为 0，全部失败�
     REQUIRE(f_out != nullptr);
     const int i4_code{run_pipeline(opt_case, fn_detect,
                                    make_record_executor(recorder), UncompressFn{},
-                                   ReleaseFn{}, f_out, f_out)};
+                                   ReleaseFn{}, DirFlagFn{}, f_out, f_out)};
     const std::wstring str_text{read_all(f_out)};
     std::fclose(f_out);
     CHECK(i4_code == 0);
@@ -588,7 +685,7 @@ TEST_CASE("run_pipeline：退出码边界——全部跳过为 0，全部失败�
     REQUIRE(f_err != nullptr);
     const int i4_code{run_pipeline(opt_case, fn_detect,
                                    make_record_executor(recorder), UncompressFn{},
-                                   ReleaseFn{}, f_out, f_err)};
+                                   ReleaseFn{}, DirFlagFn{}, f_out, f_err)};
     const std::wstring str_text{read_all(f_out)};
     const std::wstring str_err_text{read_all(f_err)};
     std::fclose(f_out);
@@ -614,7 +711,7 @@ TEST_CASE("run_pipeline：退出码边界——全部跳过为 0，全部失败�
     REQUIRE(f_err != nullptr);
     const int i4_code{run_pipeline(opt_case, fn_detect,
                                    make_record_executor(recorder), UncompressFn{},
-                                   ReleaseFn{}, f_out, f_err)};
+                                   ReleaseFn{}, DirFlagFn{}, f_out, f_err)};
     const std::wstring str_err_text{read_all(f_err)};
     std::fclose(f_out);
     std::fclose(f_err);
@@ -624,7 +721,7 @@ TEST_CASE("run_pipeline：退出码边界——全部跳过为 0，全部失败�
   }
 }
 
-TEST_CASE("run_pipeline：-v 汇总与逐文件行同出，占用项带卷卸载记录") {
+TEST_CASE("run_pipeline：-v 汇总与逐文件行同出，占用项带升级释放记录") {
   ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
   REQUIRE(tmp_dir->b_ok);
   REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"plain.bin", 8192));
@@ -643,7 +740,7 @@ TEST_CASE("run_pipeline：-v 汇总与逐文件行同出，占用项带卷卸载
   std::FILE* f_out{std::tmpfile()};
   REQUIRE(f_out != nullptr);
   const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
-                                UncompressFn{}, make_record_releaser(rec_release),
+                                UncompressFn{}, make_record_releaser(rec_release), DirFlagFn{},
                                 f_out, f_out)};
   const std::wstring str_text{read_all(f_out)};
   std::fclose(f_out);
@@ -655,7 +752,7 @@ TEST_CASE("run_pipeline：-v 汇总与逐文件行同出，占用项带卷卸载
   CHECK(contains(str_text, L"；压缩/重压 8192 → 8192 字节，节省 0%"));
 }
 
-TEST_CASE("run_pipeline：占用经强制卸载后执行且 -v 列出被关进程名") {
+TEST_CASE("run_pipeline：占用经升级释放后执行，默认输出级与被关进程") {
   ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
   REQUIRE(tmp_dir->b_ok);
   REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"plain.bin", 8192));
@@ -665,7 +762,6 @@ TEST_CASE("run_pipeline：占用经强制卸载后执行且 -v 列出被关进�
   REQUIRE(lock_file);
 
   Options opt_case{compress_options()};
-  opt_case.b_verbose = true;
   opt_case.vec_paths.push_back(ntfscompact_test::temp_path(tmp_dir));
   const DetectFn fn_detect{fake_detect};
   ExecuteRecorder recorder{};
@@ -674,7 +770,7 @@ TEST_CASE("run_pipeline：占用经强制卸载后执行且 -v 列出被关进�
   std::FILE* f_out{std::tmpfile()};
   REQUIRE(f_out != nullptr);
   const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
-                                UncompressFn{}, make_record_releaser(rec_release),
+                                UncompressFn{}, make_record_releaser(rec_release), DirFlagFn{},
                                 f_out, f_out)};
   const std::wstring str_text{read_all(f_out)};
   std::fclose(f_out);
@@ -684,13 +780,12 @@ TEST_CASE("run_pipeline：占用经强制卸载后执行且 -v 列出被关进�
   CHECK(rec_release.vec_calls[0].starts_with(L"\\\\?\\"));
   CHECK(contains(rec_release.vec_calls[0], L"plain.bin"));
   REQUIRE(recorder.vec_calls.size() == 1);
-  CHECK(contains(str_text, L"plain.bin：现状 未压缩，已压缩为指定算法 xpress8k（8192 → "));
-  CHECK_FALSE(contains(str_text, L"→ 0 字节）"));
-  CHECK(contains(str_text, L"；强制卸载：已卸载所在卷"));
+  CHECK(contains(str_text, L"plain.bin：已压缩为指定算法 xpress8k"));
+  CHECK(contains(str_text, L"；升级释放：RM 强制关（hold_app.exe PID 4242）"));
   CHECK(contains(str_text, L"共 1 个文件：压缩 1、重压 0、解压 0、跳过 0"));
 }
 
-TEST_CASE("run_pipeline：非 -v 模式不输出被关进程名") {
+TEST_CASE("run_pipeline：非 -v 模式同样默认输出升级释放审计") {
   ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
   REQUIRE(tmp_dir->b_ok);
   REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"plain.bin", 8192));
@@ -708,7 +803,7 @@ TEST_CASE("run_pipeline：非 -v 模式不输出被关进程名") {
   std::FILE* f_out{std::tmpfile()};
   REQUIRE(f_out != nullptr);
   const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
-                                UncompressFn{}, make_record_releaser(rec_release),
+                                UncompressFn{}, make_record_releaser(rec_release), DirFlagFn{},
                                 f_out, f_out)};
   const std::wstring str_text{read_all(f_out)};
   std::fclose(f_out);
@@ -716,7 +811,8 @@ TEST_CASE("run_pipeline：非 -v 模式不输出被关进程名") {
   CHECK(i4_code == 0);
   CHECK(rec_release.vec_calls.size() == 1);
   CHECK(contains(str_text, L"plain.bin：已压缩为指定算法 xpress8k"));
-  CHECK_FALSE(contains(str_text, L"强制卸载"));
+  CHECK(contains(str_text, L"；升级释放：RM 强制关（hold_app.exe PID 4242）"));
+  CHECK_FALSE(contains(str_text, L"现状 "));
 }
 
 TEST_CASE("run_pipeline：占用不可释放计跳过不计失败") {
@@ -738,7 +834,7 @@ TEST_CASE("run_pipeline：占用不可释放计跳过不计失败") {
   std::FILE* f_out{std::tmpfile()};
   REQUIRE(f_out != nullptr);
   const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
-                                UncompressFn{}, make_busy_releaser(vec_release_calls),
+                                UncompressFn{}, make_busy_releaser(vec_release_calls), DirFlagFn{},
                                 f_out, f_out)};
   const std::wstring str_text{read_all(f_out)};
   std::fclose(f_out);
@@ -748,11 +844,50 @@ TEST_CASE("run_pipeline：占用不可释放计跳过不计失败") {
   CHECK(contains(vec_release_calls[0], L"plain.bin"));
   CHECK(recorder.vec_calls.size() == 1);
   CHECK(contains(str_text, L"[跳过] "));
-  CHECK(contains(str_text, L"plain.bin：占用不可释放：卷卸载失败（模拟）"));
+  CHECK(contains(str_text, L"plain.bin：占用不可释放：升级链尽后仍被占用（模拟）"));
   CHECK(contains(str_text, L"共 2 个文件：压缩 1、重压 0、解压 0、跳过 1"));
 }
 
-TEST_CASE("run_pipeline：执行器报 32 时先强制卸载再重试一次") {
+TEST_CASE("run_pipeline：链尽跳过仍默认输出已关进程审计") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"plain.bin", 8192));
+  TestFileLock lock_file{
+      lock_test_file(ntfscompact_test::temp_long_api_path(
+          ntfscompact_test::temp_sub(tmp_dir, L"plain.bin")))};
+  REQUIRE(lock_file);
+
+  Options opt_case{compress_options()};
+  opt_case.vec_paths.push_back(ntfscompact_test::temp_path(tmp_dir));
+  const DetectFn fn_detect{fake_detect};
+  ExecuteRecorder recorder{};
+  const ReleaseFn fn_partial_release{
+      [](const std::wstring&) {
+        ntfscompact::ReleaseOutcome ro_busy{};
+        ro_busy.e_status = ntfscompact::ReleaseOutcome::Status::kBusy;
+        ro_busy.e_level = ntfscompact::ReleaseOutcome::Level::kRmForce;
+        ro_busy.vec_closed = {{777, L"stuck.exe"}};
+        ro_busy.str_detail = L"占用不可释放：升级链尽后仍被占用";
+        return ro_busy;
+      }};
+
+  std::FILE* f_out{std::tmpfile()};
+  REQUIRE(f_out != nullptr);
+  const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
+                                UncompressFn{}, fn_partial_release, DirFlagFn{},
+                                f_out, f_out)};
+  const std::wstring str_text{read_all(f_out)};
+  std::fclose(f_out);
+
+  CHECK(i4_code == 0);
+  CHECK(recorder.vec_calls.empty());
+  CHECK(contains(str_text, L"[跳过] "));
+  CHECK(contains(str_text, L"plain.bin：占用不可释放：升级链尽后仍被占用"));
+  CHECK(contains(str_text, L"；升级释放：RM 强制关（stuck.exe PID 777）"));
+  CHECK(contains(str_text, L"共 1 个文件：压缩 0、重压 0、解压 0、跳过 1"));
+}
+
+TEST_CASE("run_pipeline：执行器报 32 时先升级释放再重试一次") {
   ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
   REQUIRE(tmp_dir->b_ok);
   REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"plain.bin", 8192));
@@ -777,7 +912,7 @@ TEST_CASE("run_pipeline：执行器报 32 时先强制卸载再重试一次") {
   std::FILE* f_out{std::tmpfile()};
   REQUIRE(f_out != nullptr);
   const int i4_code{run_pipeline(opt_case, fn_detect, fn_execute, UncompressFn{},
-                                make_record_releaser(rec_release), f_out, f_out)};
+                                make_record_releaser(rec_release), DirFlagFn{}, f_out, f_out)};
   const std::wstring str_text{read_all(f_out)};
   std::fclose(f_out);
 
@@ -807,7 +942,7 @@ TEST_CASE("run_pipeline：执行器报 32 且释放失败计跳过") {
   std::FILE* f_out{std::tmpfile()};
   REQUIRE(f_out != nullptr);
   const int i4_code{run_pipeline(opt_case, fn_detect, fn_execute, UncompressFn{},
-                                make_busy_releaser(vec_release_calls), f_out, f_out)};
+                                make_busy_releaser(vec_release_calls), DirFlagFn{}, f_out, f_out)};
   const std::wstring str_text{read_all(f_out)};
   std::fclose(f_out);
 
@@ -840,7 +975,7 @@ TEST_CASE("run_pipeline：释放后重试执行仍报 32 计跳过") {
   std::FILE* f_out{std::tmpfile()};
   REQUIRE(f_out != nullptr);
   const int i4_code{run_pipeline(opt_case, fn_detect, fn_execute, UncompressFn{},
-                                make_record_releaser(rec_release), f_out, f_out)};
+                                make_record_releaser(rec_release), DirFlagFn{}, f_out, f_out)};
   const std::wstring str_text{read_all(f_out)};
   std::fclose(f_out);
 
@@ -851,7 +986,7 @@ TEST_CASE("run_pipeline：释放后重试执行仍报 32 计跳过") {
   CHECK(contains(str_text, L"plain.bin：占用不可释放"));
 }
 
-TEST_CASE("run_pipeline：非 32 错误不触发强制卸载重试") {
+TEST_CASE("run_pipeline：非 32 错误不触发升级释放重试") {
   ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
   REQUIRE(tmp_dir->b_ok);
   REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"plain.bin", 8192));
@@ -876,7 +1011,7 @@ TEST_CASE("run_pipeline：非 32 错误不触发强制卸载重试") {
   REQUIRE(f_out != nullptr);
   REQUIRE(f_err != nullptr);
   const int i4_code{run_pipeline(opt_case, fn_detect, fn_execute, UncompressFn{},
-                                make_record_releaser(rec_release), f_out, f_err)};
+                                make_record_releaser(rec_release), DirFlagFn{}, f_out, f_err)};
   std::fclose(f_out);
   std::fclose(f_err);
 
@@ -902,7 +1037,7 @@ TEST_CASE("run_pipeline：释放器未接线时保持既有行为（占用不拦
   std::FILE* f_out{std::tmpfile()};
   REQUIRE(f_out != nullptr);
   const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
-                                UncompressFn{}, ReleaseFn{}, f_out, f_out)};
+                                UncompressFn{}, ReleaseFn{}, DirFlagFn{}, f_out, f_out)};
   std::fclose(f_out);
 
   CHECK(i4_code == 0);
@@ -935,7 +1070,7 @@ TEST_CASE("run_pipeline：-u 占用不可释放计跳过不调解压器") {
   std::FILE* f_out{std::tmpfile()};
   REQUIRE(f_out != nullptr);
   const int i4_code{run_pipeline(opt_case, fn_detect, ExecuteFn{}, fn_uncompress,
-                                make_busy_releaser(vec_release_calls), f_out, f_out)};
+                                make_busy_releaser(vec_release_calls), DirFlagFn{}, f_out, f_out)};
   const std::wstring str_text{read_all(f_out)};
   std::fclose(f_out);
 
@@ -946,7 +1081,7 @@ TEST_CASE("run_pipeline：-u 占用不可释放计跳过不调解压器") {
   CHECK(contains(str_text, L"woflzx.bin：占用不可释放"));
 }
 
-TEST_CASE("run_pipeline：-u 占用经强制卸载后解压") {
+TEST_CASE("run_pipeline：-u 占用经升级释放后解压") {
   ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
   REQUIRE(tmp_dir->b_ok);
   REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"woflzx.bin", 8192));
@@ -971,10 +1106,607 @@ TEST_CASE("run_pipeline：-u 占用经强制卸载后解压") {
   std::FILE* f_out{std::tmpfile()};
   REQUIRE(f_out != nullptr);
   const int i4_code{run_pipeline(opt_case, fn_detect, ExecuteFn{}, fn_uncompress,
-                                make_record_releaser(rec_release), f_out, f_out)};
+                                make_record_releaser(rec_release), DirFlagFn{}, f_out, f_out)};
   std::fclose(f_out);
 
   CHECK(i4_code == 0);
   REQUIRE(vec_uncompress_calls.size() == 1);
   REQUIRE(rec_release.vec_calls.size() == 1);
+}
+
+TEST_CASE("run_pipeline：实跑清除目录标记先于逐文件处理") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  REQUIRE(ntfscompact_test::temp_make_dir(tmp_dir, L"one"));
+  REQUIRE(ntfscompact_test::temp_make_dir(tmp_dir, L"two"));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"one\\plain.bin", 8192));
+  REQUIRE(ntfscompact_test::mark_dir(ntfscompact_test::temp_sub(tmp_dir, L"one")));
+  REQUIRE(ntfscompact_test::mark_dir(ntfscompact_test::temp_sub(tmp_dir, L"two")));
+
+  Options opt_case{compress_options()};
+  opt_case.vec_paths.push_back(ntfscompact_test::temp_path(tmp_dir));
+  const DetectFn fn_detect{fake_detect};
+  std::vector<std::wstring> vec_events{};
+  const ExecuteFn fn_execute{
+      [&vec_events](const std::wstring& str_long_path, Plan::Action,
+                    const CurrentState&, Algorithm) {
+        vec_events.push_back(L"exec:" + str_long_path);
+        return ExecuteResult{};
+      }};
+  const DirFlagFn fn_dir_flag{
+      [&vec_events](const std::wstring& str_long_path)
+          -> std::expected<void, std::wstring> {
+        vec_events.push_back(L"clear:" + str_long_path);
+        return {};
+      }};
+
+  std::FILE* f_out{std::tmpfile()};
+  std::FILE* f_err{std::tmpfile()};
+  REQUIRE(f_out != nullptr);
+  REQUIRE(f_err != nullptr);
+  const int i4_code{run_pipeline(opt_case, fn_detect, fn_execute, UncompressFn{},
+                                ReleaseFn{}, fn_dir_flag, f_out, f_err)};
+  const std::wstring str_text{read_all(f_out)};
+  const std::wstring str_err_text{read_all(f_err)};
+  std::fclose(f_out);
+  std::fclose(f_err);
+
+  CHECK(i4_code == 0);
+  CHECK(str_err_text.empty());
+  REQUIRE(vec_events.size() == 3);
+  CHECK(vec_events[0].rfind(L"clear:", 0) == 0);
+  CHECK(vec_events[1].rfind(L"clear:", 0) == 0);
+  CHECK(vec_events[2].rfind(L"exec:", 0) == 0);
+  CHECK(contains(str_text,
+                 ntfscompact_test::temp_sub(tmp_dir, L"one") + L"：已清除标记"));
+  CHECK(contains(str_text,
+                 ntfscompact_test::temp_sub(tmp_dir, L"two") + L"：已清除标记"));
+  CHECK(contains(str_text, L"[目录标记] "));
+  CHECK(contains(str_text, L"；已清除目录标记 2 个"));
+}
+
+TEST_CASE("run_pipeline：目录标记清除失败计错误进 stderr 且退出码 1，其余照常") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  REQUIRE(ntfscompact_test::temp_make_dir(tmp_dir, L"bad"));
+  REQUIRE(ntfscompact_test::temp_make_dir(tmp_dir, L"good"));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"bad\\plain.bin", 8192));
+  REQUIRE(ntfscompact_test::mark_dir(ntfscompact_test::temp_sub(tmp_dir, L"bad")));
+  REQUIRE(ntfscompact_test::mark_dir(ntfscompact_test::temp_sub(tmp_dir, L"good")));
+
+  Options opt_case{compress_options()};
+  opt_case.vec_paths.push_back(ntfscompact_test::temp_path(tmp_dir));
+  const DetectFn fn_detect{fake_detect};
+  ExecuteRecorder recorder{};
+  const DirFlagFn fn_dir_flag{
+      [](const std::wstring& str_long_path) -> std::expected<void, std::wstring> {
+        if (str_long_path.find(L"bad") != std::wstring::npos) {
+          return std::unexpected(L"无法打开目录（错误码 5）（模拟）");
+        }
+        return {};
+      }};
+
+  std::FILE* f_out{std::tmpfile()};
+  std::FILE* f_err{std::tmpfile()};
+  REQUIRE(f_out != nullptr);
+  REQUIRE(f_err != nullptr);
+  const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
+                                UncompressFn{}, ReleaseFn{}, fn_dir_flag, f_out, f_err)};
+  const std::wstring str_text{read_all(f_out)};
+  const std::wstring str_err_text{read_all(f_err)};
+  std::fclose(f_out);
+  std::fclose(f_err);
+
+  CHECK(i4_code == 1);
+  CHECK(contains(str_err_text,
+                 ntfscompact_test::temp_sub(tmp_dir, L"bad") +
+                     L"：无法打开目录（错误码 5）（模拟）"));
+  CHECK(contains(str_err_text, L"[失败] "));
+  CHECK(contains(str_text,
+                 ntfscompact_test::temp_sub(tmp_dir, L"good") + L"：已清除标记"));
+  CHECK(contains(str_text, L"plain.bin：已压缩为指定算法 xpress8k"));
+  CHECK(contains(str_text, L"；失败 1"));
+  CHECK(contains(str_text, L"；已清除目录标记 1 个"));
+  REQUIRE(recorder.vec_calls.size() == 1);
+}
+
+TEST_CASE("run_pipeline：干跑只列目录标记，不清除不执行") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  REQUIRE(ntfscompact_test::temp_make_dir(tmp_dir, L"one"));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"one\\plain.bin", 8192));
+  const std::wstring str_marked{ntfscompact_test::temp_sub(tmp_dir, L"one")};
+  REQUIRE(ntfscompact_test::mark_dir(str_marked));
+
+  Options opt_case{compress_options()};
+  opt_case.b_dry_run = true;
+  opt_case.vec_paths.push_back(ntfscompact_test::temp_path(tmp_dir));
+  const DetectFn fn_detect{fake_detect};
+  ExecuteRecorder recorder{};
+  std::vector<std::wstring> vec_dir_calls{};
+  const DirFlagFn fn_dir_flag{
+      [&vec_dir_calls](const std::wstring& str_long_path)
+          -> std::expected<void, std::wstring> {
+        vec_dir_calls.push_back(str_long_path);
+        return {};
+      }};
+
+  std::FILE* f_out{std::tmpfile()};
+  std::FILE* f_err{std::tmpfile()};
+  REQUIRE(f_out != nullptr);
+  REQUIRE(f_err != nullptr);
+  const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
+                                UncompressFn{}, ReleaseFn{}, fn_dir_flag, f_out, f_err)};
+  const std::wstring str_text{read_all(f_out)};
+  std::fclose(f_out);
+  std::fclose(f_err);
+
+  CHECK(i4_code == 0);
+  CHECK(vec_dir_calls.empty());
+  CHECK(recorder.vec_calls.empty());
+  CHECK(contains(str_text, str_marked + L"：将清除标记"));
+  CHECK(contains(str_text, L"；将清除目录标记 1 个"));
+  CHECK(ntfscompact_test::dir_is_marked(str_marked));
+}
+
+TEST_CASE("run_pipeline：-q 目录行受抑，汇总计数仍在") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  REQUIRE(ntfscompact_test::temp_make_dir(tmp_dir, L"one"));
+  REQUIRE(ntfscompact_test::temp_make_dir(tmp_dir, L"two"));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"one\\plain.bin", 8192));
+  REQUIRE(ntfscompact_test::mark_dir(ntfscompact_test::temp_sub(tmp_dir, L"one")));
+  REQUIRE(ntfscompact_test::mark_dir(ntfscompact_test::temp_sub(tmp_dir, L"two")));
+
+  Options opt_case{compress_options()};
+  opt_case.b_quiet = true;
+  opt_case.vec_paths.push_back(ntfscompact_test::temp_path(tmp_dir));
+  const DetectFn fn_detect{fake_detect};
+  ExecuteRecorder recorder{};
+  const DirFlagFn fn_dir_flag{[](const std::wstring&) -> std::expected<void, std::wstring> {
+    return {};
+  }};
+
+  std::FILE* f_out{std::tmpfile()};
+  std::FILE* f_err{std::tmpfile()};
+  REQUIRE(f_out != nullptr);
+  REQUIRE(f_err != nullptr);
+  const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
+                                UncompressFn{}, ReleaseFn{}, fn_dir_flag, f_out, f_err)};
+  const std::wstring str_text{read_all(f_out)};
+  const std::wstring str_err_text{read_all(f_err)};
+  std::fclose(f_out);
+  std::fclose(f_err);
+
+  CHECK(i4_code == 0);
+  CHECK(str_err_text.empty());
+  CHECK(count_lines(str_text) == 1);
+  CHECK(contains(str_text, L"；已清除目录标记 2 个"));
+  CHECK_FALSE(contains(str_text, L"["));
+  CHECK(recorder.vec_calls.size() == 1);
+}
+
+TEST_CASE("run_pipeline：解压模式同样清除目录标记") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  REQUIRE(ntfscompact_test::temp_make_dir(tmp_dir, L"one"));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"one\\woflzx.bin", 8192));
+  REQUIRE(ntfscompact_test::mark_dir(ntfscompact_test::temp_sub(tmp_dir, L"one")));
+
+  Options opt_case{compress_options()};
+  opt_case.b_uncompress = true;
+  opt_case.vec_paths.push_back(ntfscompact_test::temp_path(tmp_dir));
+  const DetectFn fn_detect{fake_detect};
+  std::vector<std::wstring> vec_uncompress_calls{};
+  const UncompressFn fn_uncompress{
+      [&vec_uncompress_calls](const std::wstring& str_long_path)
+          -> std::expected<void, std::wstring> {
+        vec_uncompress_calls.push_back(str_long_path);
+        return {};
+      }};
+  std::vector<std::wstring> vec_dir_calls{};
+  const DirFlagFn fn_dir_flag{
+      [&vec_dir_calls](const std::wstring& str_long_path)
+          -> std::expected<void, std::wstring> {
+        vec_dir_calls.push_back(str_long_path);
+        return {};
+      }};
+
+  std::FILE* f_out{std::tmpfile()};
+  std::FILE* f_err{std::tmpfile()};
+  REQUIRE(f_out != nullptr);
+  REQUIRE(f_err != nullptr);
+  const int i4_code{run_pipeline(opt_case, fn_detect, ExecuteFn{}, fn_uncompress,
+                                ReleaseFn{}, fn_dir_flag, f_out, f_err)};
+  const std::wstring str_text{read_all(f_out)};
+  const std::wstring str_err_text{read_all(f_err)};
+  std::fclose(f_out);
+  std::fclose(f_err);
+
+  CHECK(i4_code == 0);
+  CHECK(str_err_text.empty());
+  REQUIRE(vec_dir_calls.size() == 1);
+  CHECK(contains(vec_dir_calls[0], L"one"));
+  CHECK(contains(str_text,
+                 ntfscompact_test::temp_sub(tmp_dir, L"one") + L"：已清除标记"));
+  CHECK(contains(str_text, L"；已清除目录标记 1 个"));
+  REQUIRE(vec_uncompress_calls.size() == 1);
+  CHECK(contains(str_text, L"woflzx.bin：已解压"));
+}
+
+TEST_CASE("run_pipeline：检测下沉——目录标记清除先于首次检测") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  REQUIRE(ntfscompact_test::temp_make_dir(tmp_dir, L"one"));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"one\\plain.bin", 8192));
+  REQUIRE(ntfscompact_test::mark_dir(ntfscompact_test::temp_sub(tmp_dir, L"one")));
+
+  Options opt_case{compress_options()};
+  opt_case.vec_paths.push_back(ntfscompact_test::temp_path(tmp_dir));
+  DetectRecorder rec_detect{};
+  std::vector<std::wstring> vec_events{};
+  const DetectFn fn_detect{
+      [&rec_detect, &vec_events](const std::wstring& str_long_path) {
+        vec_events.push_back(L"detect:" + str_long_path);
+        rec_detect.vec_calls.push_back(str_long_path);
+        return fake_detect(str_long_path);
+      }};
+  const DirFlagFn fn_dir_flag{
+      [&vec_events](const std::wstring& str_long_path)
+          -> std::expected<void, std::wstring> {
+        vec_events.push_back(L"clear:" + str_long_path);
+        return {};
+      }};
+  ExecuteRecorder recorder{};
+
+  std::FILE* f_out{std::tmpfile()};
+  std::FILE* f_err{std::tmpfile()};
+  REQUIRE(f_out != nullptr);
+  REQUIRE(f_err != nullptr);
+  const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
+                                UncompressFn{}, ReleaseFn{}, fn_dir_flag, f_out, f_err)};
+  std::fclose(f_out);
+  std::fclose(f_err);
+
+  CHECK(i4_code == 0);
+  REQUIRE(rec_detect.vec_calls.size() == 1);
+  std::size_t u8_first_detect{vec_events.size()};
+  std::size_t u8_last_clear{0};
+  for (std::size_t u8_index{0}; u8_index < vec_events.size(); ++u8_index) {
+    if (vec_events[u8_index].rfind(L"detect:", 0) == 0) {
+      u8_first_detect = std::min(u8_first_detect, u8_index);
+    }
+    if (vec_events[u8_index].rfind(L"clear:", 0) == 0) {
+      u8_last_clear = std::max(u8_last_clear, u8_index);
+    }
+  }
+  CHECK(u8_last_clear < u8_first_detect);
+}
+
+TEST_CASE("run_pipeline：检测守恒——每候选文件恰一次检测，扫描跳过零检测") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  const std::wstring str_dir{make_fixture(tmp_dir)};
+
+  Options opt_case{compress_options()};
+  opt_case.b_dry_run = true;
+  opt_case.vec_paths.push_back(str_dir);
+  DetectRecorder rec_detect{};
+  const DetectFn fn_detect{make_record_detector(rec_detect)};
+  ExecuteRecorder recorder{};
+
+  std::FILE* f_out{std::tmpfile()};
+  REQUIRE(f_out != nullptr);
+  const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
+                                UncompressFn{}, ReleaseFn{}, DirFlagFn{}, f_out, f_out)};
+  std::fclose(f_out);
+
+  CHECK(i4_code == 1);
+  REQUIRE(rec_detect.vec_calls.size() == 7);
+  bool b_has_tiny{false};
+  for (const std::wstring& str_call : rec_detect.vec_calls) {
+    b_has_tiny = b_has_tiny || contains(str_call, L"tiny.bin");
+  }
+  CHECK_FALSE(b_has_tiny);
+}
+
+TEST_CASE("run_scan：中断轮询器首查置位——枚举停机并标记 b_interrupted") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  const std::wstring str_dir{make_fixture(tmp_dir)};
+
+  int i4_calls{0};
+  const InterruptPoller fn_poll{make_trip_poller(i4_calls, 1)};
+  Options opt_case{compress_options()};
+  opt_case.vec_paths.push_back(str_dir);
+  const ScanOutcome so_scan{run_scan(opt_case, fn_poll)};
+
+  CHECK(so_scan.b_interrupted);
+  CHECK(so_scan.vec_items.empty());
+  CHECK(i4_calls >= 1);
+}
+
+TEST_CASE("run_scan：中断轮询器恒假——枚举产物与无中断一致") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  const std::wstring str_dir{make_fixture(tmp_dir)};
+
+  int i4_calls{0};
+  const InterruptPoller fn_poll{[&i4_calls]() {
+    ++i4_calls;
+    return false;
+  }};
+  Options opt_case{compress_options()};
+  opt_case.vec_paths.push_back(str_dir);
+  const ScanOutcome so_scan{run_scan(opt_case, fn_poll)};
+
+  CHECK_FALSE(so_scan.b_interrupted);
+  CHECK(so_scan.vec_items.size() == 7);
+}
+
+TEST_CASE("run_pipeline：实跑逐文件边界中断——在途项走完不再开始新项，标注停止于完成项") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"a_plain.bin", 8192));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"z_plain.bin", 8192));
+
+  Options opt_case{compress_options()};
+  opt_case.vec_paths.push_back(ntfscompact_test::temp_path(tmp_dir));
+  const DetectFn fn_detect{fake_detect};
+  ExecuteRecorder recorder{};
+  int i4_calls{0};
+
+  std::FILE* f_out{std::tmpfile()};
+  REQUIRE(f_out != nullptr);
+  const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
+                                 UncompressFn{}, ReleaseFn{}, DirFlagFn{}, f_out,
+                                 f_out, make_trip_poller(i4_calls, 5))};
+  const std::wstring str_text{read_all(f_out)};
+  std::fclose(f_out);
+
+  CHECK(i4_code == 3);
+  REQUIRE(recorder.vec_calls.size() == 1);
+  const std::wstring str_done{
+      recorder.vec_calls[0].str_long_path.substr(
+          recorder.vec_calls[0].str_long_path.find_last_of(L"\\") + 1)};
+  const std::wstring str_done_display{
+      recorder.vec_calls[0].str_long_path.substr(4)};
+  CHECK(contains(str_text, L"已被 Ctrl+C 中断：停止于 " + str_done_display));
+  CHECK(contains(str_text, L"共 1 个文件：压缩 1、重压 0、解压 0、跳过 0"));
+  const std::wstring str_other{str_done == L"a_plain.bin" ? L"z_plain.bin"
+                                                          : L"a_plain.bin"};
+  CHECK_FALSE(contains(str_text, str_other));
+  CHECK_FALSE(contains(str_text, L"停止扫描"));
+}
+
+TEST_CASE("run_pipeline：实跑首边界中断且无完成项——标注回退停止于边界待处理项") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"a_plain.bin", 8192));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"z_plain.bin", 8192));
+
+  Options opt_case{compress_options()};
+  opt_case.vec_paths.push_back(ntfscompact_test::temp_path(tmp_dir));
+  const DetectFn fn_detect{fake_detect};
+  ExecuteRecorder recorder{};
+  int i4_calls{0};
+
+  std::FILE* f_out{std::tmpfile()};
+  REQUIRE(f_out != nullptr);
+  const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
+                                 UncompressFn{}, ReleaseFn{}, DirFlagFn{}, f_out,
+                                 f_out, make_trip_poller(i4_calls, 4))};
+  const std::wstring str_text{read_all(f_out)};
+  std::fclose(f_out);
+
+  CHECK(i4_code == 3);
+  CHECK(recorder.vec_calls.empty());
+  CHECK(i4_calls == 4);
+  CHECK(contains(str_text, L"已被 Ctrl+C 中断：停止于 "));
+  const bool b_stop_at_pending{
+      contains(str_text, L"已被 Ctrl+C 中断：停止于 " +
+                             ntfscompact_test::temp_sub(tmp_dir, L"a_plain.bin")) ||
+      contains(str_text, L"已被 Ctrl+C 中断：停止于 " +
+                             ntfscompact_test::temp_sub(tmp_dir, L"z_plain.bin"))};
+  CHECK(b_stop_at_pending);
+  CHECK(contains(str_text, L"共 0 个文件：压缩 0、重压 0、解压 0、跳过 0"));
+}
+
+TEST_CASE("run_pipeline：干跑逐文件边界中断——标注停止扫描，已打印行为准") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"a_plain.bin", 8192));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"z_plain.bin", 8192));
+
+  Options opt_case{compress_options()};
+  opt_case.b_dry_run = true;
+  opt_case.vec_paths.push_back(ntfscompact_test::temp_path(tmp_dir));
+  const DetectFn fn_detect{fake_detect};
+  ExecuteRecorder recorder{};
+  int i4_calls{0};
+
+  std::FILE* f_out{std::tmpfile()};
+  REQUIRE(f_out != nullptr);
+  const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
+                                 UncompressFn{}, ReleaseFn{}, DirFlagFn{}, f_out,
+                                 f_out, make_trip_poller(i4_calls, 5))};
+  const std::wstring str_text{read_all(f_out)};
+  std::fclose(f_out);
+
+  CHECK(i4_code == 3);
+  CHECK(recorder.vec_calls.empty());
+  CHECK(contains(str_text, L"已被 Ctrl+C 中断：停止扫描"));
+  CHECK(contains(str_text, L"[压缩] "));
+  CHECK(contains(str_text, L"共 1 个文件：压缩 1、重压 0、解压 0、跳过 0"));
+  CHECK_FALSE(contains(str_text, L"停止于 "));
+}
+
+TEST_CASE("run_pipeline：-q 实跑中断——汇总照旧且标注随汇总共两行") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"a_plain.bin", 8192));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"z_plain.bin", 8192));
+
+  Options opt_case{compress_options()};
+  opt_case.b_quiet = true;
+  opt_case.vec_paths.push_back(ntfscompact_test::temp_path(tmp_dir));
+  const DetectFn fn_detect{fake_detect};
+  ExecuteRecorder recorder{};
+  int i4_calls{0};
+
+  std::FILE* f_out{std::tmpfile()};
+  REQUIRE(f_out != nullptr);
+  const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
+                                 UncompressFn{}, ReleaseFn{}, DirFlagFn{}, f_out,
+                                 f_out, make_trip_poller(i4_calls, 5))};
+  const std::wstring str_text{read_all(f_out)};
+  std::fclose(f_out);
+
+  CHECK(i4_code == 3);
+  CHECK(recorder.vec_calls.size() == 1);
+  CHECK(count_lines(str_text) == 2);
+  CHECK(contains(str_text, L"共 1 个文件：压缩 1、重压 0、解压 0、跳过 0"));
+  CHECK(contains(str_text, L"已被 Ctrl+C 中断：停止于 "));
+}
+
+TEST_CASE("run_pipeline：扫描期中断——不检测不执行不进逐文件，标注停止扫描") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  const std::wstring str_dir{make_fixture(tmp_dir)};
+
+  Options opt_case{compress_options()};
+  opt_case.vec_paths.push_back(str_dir);
+  DetectRecorder rec_detect{};
+  const DetectFn fn_detect{make_record_detector(rec_detect)};
+  ExecuteRecorder recorder{};
+  int i4_calls{0};
+
+  std::FILE* f_out{std::tmpfile()};
+  std::FILE* f_err{std::tmpfile()};
+  REQUIRE(f_out != nullptr);
+  REQUIRE(f_err != nullptr);
+  const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
+                                 UncompressFn{}, ReleaseFn{}, DirFlagFn{}, f_out,
+                                 f_err, make_trip_poller(i4_calls, 1))};
+  const std::wstring str_text{read_all(f_out)};
+  std::fclose(f_out);
+  std::fclose(f_err);
+
+  CHECK(i4_code == 3);
+  CHECK(rec_detect.vec_calls.empty());
+  CHECK(recorder.vec_calls.empty());
+  CHECK_FALSE(contains(str_text, L"[压缩] "));
+  CHECK(contains(str_text, L"已被 Ctrl+C 中断：停止扫描"));
+}
+
+TEST_CASE("run_pipeline：实跑目录标记清除边界中断——已清项落账其余保留") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  REQUIRE(ntfscompact_test::temp_make_dir(tmp_dir, L"one"));
+  REQUIRE(ntfscompact_test::temp_make_dir(tmp_dir, L"two"));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"plain.bin", 8192));
+  REQUIRE(ntfscompact_test::mark_dir(ntfscompact_test::temp_sub(tmp_dir, L"one")));
+  REQUIRE(ntfscompact_test::mark_dir(ntfscompact_test::temp_sub(tmp_dir, L"two")));
+  const std::wstring str_one{ntfscompact_test::temp_sub(tmp_dir, L"one")};
+  const std::wstring str_two{ntfscompact_test::temp_sub(tmp_dir, L"two")};
+
+  Options opt_case{compress_options()};
+  opt_case.vec_paths.push_back(ntfscompact_test::temp_path(tmp_dir));
+  const DetectFn fn_detect{fake_detect};
+  ExecuteRecorder recorder{};
+  const DirFlagFn fn_dir_flag{
+      [](const std::wstring& str_long_path)
+          -> std::expected<void, std::wstring> {
+        return ntfscompact::clear_dir_flag(str_long_path);
+      }};
+  int i4_calls{0};
+
+  std::FILE* f_out{std::tmpfile()};
+  REQUIRE(f_out != nullptr);
+  const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
+                                 UncompressFn{}, ReleaseFn{}, fn_dir_flag, f_out,
+                                 f_out, make_trip_poller(i4_calls, 6))};
+  const std::wstring str_text{read_all(f_out)};
+  std::fclose(f_out);
+
+  CHECK(i4_code == 3);
+  CHECK(recorder.vec_calls.empty());
+  CHECK(contains(str_text, L"；已清除目录标记 1 个"));
+  CHECK(contains(str_text, L"已被 Ctrl+C 中断：停止于 "));
+  const bool b_one_cleared{!ntfscompact_test::dir_is_marked(str_one)};
+  const bool b_two_cleared{!ntfscompact_test::dir_is_marked(str_two)};
+  CHECK(b_one_cleared != b_two_cleared);
+  CHECK(contains(str_text, b_one_cleared ? str_one : str_two));
+}
+
+TEST_CASE("run_pipeline：中断期执行器报守卫恢复失败——错误行进 stderr 计失败被 3 覆盖") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"a_plain.bin", 8192));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"z_plain.bin", 8192));
+
+  Options opt_case{compress_options()};
+  opt_case.vec_paths.push_back(ntfscompact_test::temp_path(tmp_dir));
+  const DetectFn fn_detect{fake_detect};
+  const ExecuteFn fn_execute{
+      [](const std::wstring&, Plan::Action, const CurrentState&, Algorithm) {
+        ExecuteResult er_result{};
+        er_result.e_outcome = ExecuteResult::Outcome::kError;
+        er_result.str_message = L"恢复只读属性失败（错误码 5）（模拟）";
+        er_result.u4_error = 5;
+        return er_result;
+      }};
+  int i4_calls{0};
+
+  std::FILE* f_out{std::tmpfile()};
+  std::FILE* f_err{std::tmpfile()};
+  REQUIRE(f_out != nullptr);
+  REQUIRE(f_err != nullptr);
+  const int i4_code{run_pipeline(opt_case, fn_detect, fn_execute, UncompressFn{},
+                                 ReleaseFn{}, DirFlagFn{}, f_out, f_err,
+                                 make_trip_poller(i4_calls, 5))};
+  const std::wstring str_text{read_all(f_out)};
+  const std::wstring str_err_text{read_all(f_err)};
+  std::fclose(f_out);
+  std::fclose(f_err);
+
+  CHECK(i4_code == 3);
+  CHECK(contains(str_err_text, L"恢复只读属性失败（错误码 5）（模拟）"));
+  CHECK(contains(str_text, L"；失败 1"));
+  CHECK(contains(str_text, L"已被 Ctrl+C 中断：停止于 "));
+}
+
+TEST_CASE("run_pipeline：中断边界前在途项升级释放链全程走完并落审计") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"a_plain.bin", 8192));
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"z_plain.bin", 8192));
+  TestFileLock lock_file{
+      lock_test_file(ntfscompact_test::temp_long_api_path(
+          ntfscompact_test::temp_sub(tmp_dir, L"a_plain.bin")))};
+  REQUIRE(lock_file);
+
+  Options opt_case{compress_options()};
+  opt_case.vec_paths.push_back(ntfscompact_test::temp_path(tmp_dir));
+  const DetectFn fn_detect{fake_detect};
+  ExecuteRecorder recorder{};
+  ReleaseRecorder rec_release{make_release_recorder()};
+  int i4_calls{0};
+
+  std::FILE* f_out{std::tmpfile()};
+  REQUIRE(f_out != nullptr);
+  const int i4_code{run_pipeline(opt_case, fn_detect, make_record_executor(recorder),
+                                 UncompressFn{}, make_record_releaser(rec_release),
+                                 DirFlagFn{}, f_out, f_out,
+                                 make_trip_poller(i4_calls, 5))};
+  const std::wstring str_text{read_all(f_out)};
+  std::fclose(f_out);
+
+  CHECK(i4_code == 3);
+  CHECK(i4_calls == 5);
+  REQUIRE(rec_release.vec_calls.size() == 1);
+  CHECK(contains(rec_release.vec_calls[0], L"a_plain.bin"));
+  REQUIRE(recorder.vec_calls.size() == 1);
+  CHECK(contains(str_text, L"a_plain.bin：已压缩为指定算法 xpress8k"));
+  CHECK(contains(str_text, L"；升级释放：RM 强制关（hold_app.exe PID 4242）"));
+  CHECK(contains(str_text,
+                 L"已被 Ctrl+C 中断：停止于 " +
+                     recorder.vec_calls[0].str_long_path.substr(4)));
+  CHECK_FALSE(contains(str_text, L"z_plain.bin"));
 }

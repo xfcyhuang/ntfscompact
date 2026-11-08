@@ -38,11 +38,12 @@ ReleaseGate gate_release(const std::wstring& str_long_path,
     case ReleaseOutcome::Status::kFree:
       break;
     case ReleaseOutcome::Status::kReleased:
-      if (ro_release.b_dismounted) {
-        gate_result.vec_released.push_back(L"已卸载所在卷");
-      }
+      gate_result.vec_released.push_back(release_audit_entry(ro_release));
       break;
     case ReleaseOutcome::Status::kBusy:
+      if (!ro_release.vec_closed.empty()) {
+        gate_result.vec_released.push_back(release_audit_entry(ro_release));
+      }
       gate_result.b_busy = true;
       gate_result.str_busy_reason = ro_release.str_detail.empty()
                                         ? std::wstring{L"占用不可释放"}
@@ -99,6 +100,44 @@ void emit_report(const FileReport& fr_report, const Options& opt_options,
   }
 }
 
+FileReport make_skip_report(const ScanSkip& sk_skip) {
+  FileReport fr_report{};
+  fr_report.str_display_path = sk_skip.str_display_path;
+  fr_report.b_has_state = false;
+  fr_report.pl_plan.e_action = Plan::Action::kSkip;
+  fr_report.pl_plan.str_reason = sk_skip.str_reason;
+  return fr_report;
+}
+
+FileReport make_scan_error_report(const ScanError& se_error) {
+  FileReport fr_report{};
+  fr_report.str_display_path = se_error.str_display_path;
+  fr_report.str_error = se_error.str_message;
+  return fr_report;
+}
+
+struct BoundaryState {
+  bool b_interrupted{false};
+  std::wstring str_last_done{};
+  std::wstring str_stop_path{};
+};
+
+bool boundary_poll(BoundaryState& bs_state, const InterruptPoller& fn_poll,
+                   const std::wstring& str_current) {
+  if (bs_state.b_interrupted) {
+    return true;
+  }
+  if (interrupt_requested(fn_poll)) {
+    bs_state.b_interrupted = true;
+    bs_state.str_stop_path = bs_state.str_last_done.empty()
+                                 ? str_current
+                                 : bs_state.str_last_done;
+    return true;
+  }
+  bs_state.str_last_done = str_current;
+  return false;
+}
+
 
 }
 
@@ -116,20 +155,76 @@ void collect_byte_stats(PipelineResult& pl_result) {
   }
 }
 
-PipelineResult run_scan(const Options& opt_options, const DetectFn& fn_detect) {
-  PipelineResult pl_result{};
+ScanOutcome run_scan(const Options& opt_options, const InterruptPoller& fn_poll) {
   ScanOutcome so_scan{};
-  scan_paths(opt_options.vec_paths, so_scan);
+  scan_paths(opt_options.vec_paths, so_scan, fn_poll);
+  return so_scan;
+}
 
+int run_pipeline(const Options& opt_options, const DetectFn& fn_detect,
+                 const ExecuteFn& fn_execute,
+                 const UncompressFn& fn_uncompress, const ReleaseFn& fn_release,
+                 const DirFlagFn& fn_dir_flag, std::FILE* f_out,
+                 std::FILE* f_err, const InterruptPoller& fn_poll) {
+  PipelineResult pl_result{};
+  const ScanOutcome so_scan{run_scan(opt_options, fn_poll)};
+  const bool b_scan_interrupted{so_scan.b_interrupted};
+  BoundaryState bs_boundary{};
+  bs_boundary.b_interrupted = b_scan_interrupted;
   for (const ScanSkip& sk_skip : so_scan.vec_skipped) {
-    FileReport fr_report{};
-    fr_report.str_display_path = sk_skip.str_display_path;
-    fr_report.b_has_state = false;
-    fr_report.pl_plan.e_action = Plan::Action::kSkip;
-    fr_report.pl_plan.str_reason = sk_skip.str_reason;
-    pl_result.vec_reports.push_back(fr_report);
+    pl_result.vec_reports.push_back(make_skip_report(sk_skip));
   }
+  for (const FlaggedDir& fd_flag : so_scan.vec_flagged_dirs) {
+    DirFlagReport df_report{};
+    df_report.str_display_path = fd_flag.str_display_path;
+    df_report.str_long_path = fd_flag.str_long_path;
+    pl_result.vec_dir_flags.push_back(df_report);
+  }
+
+  if (!opt_options.b_dry_run) {
+    for (DirFlagReport& df_report : pl_result.vec_dir_flags) {
+      if (boundary_poll(bs_boundary, fn_poll, df_report.str_display_path)) {
+        break;
+      }
+      if (!fn_dir_flag) {
+        df_report.str_error = L"标记清除器未接线";
+        ++pl_result.i4_failures;
+        write_utf8(f_err, format_dir_flag_line(df_report, opt_options) + L"\n");
+        continue;
+      }
+      const std::expected<void, std::wstring> xe_clear{
+          fn_dir_flag(df_report.str_long_path)};
+      if (!xe_clear.has_value()) {
+        df_report.str_error = xe_clear.error();
+        ++pl_result.i4_failures;
+        write_utf8(f_err, format_dir_flag_line(df_report, opt_options) + L"\n");
+        continue;
+      }
+      df_report.b_cleared = true;
+      if (!opt_options.b_quiet) {
+        write_utf8(f_out, format_dir_flag_line(df_report, opt_options) + L"\n");
+      }
+    }
+  }
+  if (opt_options.b_dry_run) {
+    for (const DirFlagReport& df_report : pl_result.vec_dir_flags) {
+      if (boundary_poll(bs_boundary, fn_poll, df_report.str_display_path)) {
+        break;
+      }
+      if (!opt_options.b_quiet) {
+        write_utf8(f_out, format_dir_flag_line(df_report, opt_options) + L"\n");
+      }
+    }
+  }
+
+  for (const FileReport& fr_skip : pl_result.vec_reports) {
+    emit_report(fr_skip, opt_options, f_out, f_err);
+  }
+
   for (const ScanItem& si_item : so_scan.vec_items) {
+    if (boundary_poll(bs_boundary, fn_poll, si_item.str_display_path)) {
+      break;
+    }
     FileReport fr_report{};
     fr_report.str_display_path = si_item.str_display_path;
     fr_report.str_long_path = si_item.str_long_path;
@@ -139,125 +234,121 @@ PipelineResult run_scan(const Options& opt_options, const DetectFn& fn_detect) {
       fr_report.str_error = dr_detect.str_error;
       ++pl_result.i4_failures;
       pl_result.vec_reports.push_back(fr_report);
+      emit_report(fr_report, opt_options, f_out, f_err);
       continue;
     }
     fr_report.b_has_state = true;
     fr_report.cs_state = dr_detect.cs_state;
     fr_report.pl_plan = decide_action(dr_detect.cs_state, opt_options);
-    pl_result.vec_reports.push_back(fr_report);
-  }
-  for (const ScanError& se_error : so_scan.vec_errors) {
-    FileReport fr_report{};
-    fr_report.str_display_path = se_error.str_display_path;
-    fr_report.str_error = se_error.str_message;
-    ++pl_result.i4_failures;
-    pl_result.vec_reports.push_back(fr_report);
-  }
-  return pl_result;
-}
-
-int run_pipeline(const Options& opt_options, const DetectFn& fn_detect,
-                 const ExecuteFn& fn_execute,
-                 const UncompressFn& fn_uncompress, const ReleaseFn& fn_release,
-                 std::FILE* f_out, std::FILE* f_err) {
-  PipelineResult pl_result{run_scan(opt_options, fn_detect)};
-
-  if (!opt_options.b_dry_run) {
-    for (FileReport& fr_report : pl_result.vec_reports) {
-      if (!fr_report.str_error.empty()) {
-        emit_report(fr_report, opt_options, f_out, f_err);
-        continue;
-      }
-      switch (fr_report.pl_plan.e_action) {
-        case Plan::Action::kCompress:
-        case Plan::Action::kRecompress: {
-          ReleaseGate gate_ensure{
-              ensure_released(fr_report.str_long_path, fn_release)};
-          if (!gate_ensure.b_busy) {
-            append_released(fr_report.vec_released, gate_ensure.vec_released);
-            fr_report.er_exec =
-                fn_execute(fr_report.str_long_path,
-                           fr_report.pl_plan.e_action, fr_report.cs_state,
-                           opt_options.e_algorithm);
-            fr_report.b_executed = true;
-            if (fn_release && fr_report.b_executed &&
-                fr_report.er_exec.e_outcome ==
-                    ExecuteResult::Outcome::kError &&
-                fr_report.er_exec.u4_error == kWin32SharingViolation) {
-              ReleaseGate gate_retry{
-                  gate_release(fr_report.str_long_path, fn_release)};
-              if (gate_retry.b_busy) {
-                mark_busy_skip(fr_report, gate_retry.str_busy_reason);
-              } else {
-                append_released(fr_report.vec_released,
-                                gate_retry.vec_released);
-                fr_report.er_exec =
-                    fn_execute(fr_report.str_long_path,
-                               fr_report.pl_plan.e_action,
-                               fr_report.cs_state,
-                               opt_options.e_algorithm);
-                if (fr_report.er_exec.e_outcome ==
-                        ExecuteResult::Outcome::kError &&
-                    fr_report.er_exec.u4_error == kWin32SharingViolation) {
-                  mark_busy_skip(
-                      fr_report,
-                      L"占用不可释放：卷卸载后重试执行仍报占用（错误码 32）");
-                }
+    if (opt_options.b_dry_run) {
+      pl_result.vec_reports.push_back(fr_report);
+      emit_report(fr_report, opt_options, f_out, f_err);
+      continue;
+    }
+    switch (fr_report.pl_plan.e_action) {
+      case Plan::Action::kCompress:
+      case Plan::Action::kRecompress: {
+        ReleaseGate gate_ensure{
+            ensure_released(fr_report.str_long_path, fn_release)};
+        if (!gate_ensure.b_busy) {
+          append_released(fr_report.vec_released, gate_ensure.vec_released);
+          fr_report.er_exec =
+              fn_execute(fr_report.str_long_path,
+                         fr_report.pl_plan.e_action, fr_report.cs_state,
+                         opt_options.e_algorithm);
+          fr_report.b_executed = true;
+          if (fn_release && fr_report.b_executed &&
+              fr_report.er_exec.e_outcome ==
+                  ExecuteResult::Outcome::kError &&
+              fr_report.er_exec.u4_error == kWin32SharingViolation) {
+            ReleaseGate gate_retry{
+                gate_release(fr_report.str_long_path, fn_release)};
+            if (gate_retry.b_busy) {
+              append_released(fr_report.vec_released,
+                              gate_retry.vec_released);
+              mark_busy_skip(fr_report, gate_retry.str_busy_reason);
+            } else {
+              append_released(fr_report.vec_released,
+                              gate_retry.vec_released);
+              fr_report.er_exec =
+                  fn_execute(fr_report.str_long_path,
+                             fr_report.pl_plan.e_action,
+                             fr_report.cs_state,
+                             opt_options.e_algorithm);
+              if (fr_report.er_exec.e_outcome ==
+                      ExecuteResult::Outcome::kError &&
+                  fr_report.er_exec.u4_error == kWin32SharingViolation) {
+                mark_busy_skip(
+                    fr_report,
+                    L"占用不可释放：升级释放后重试执行仍报占用（错误码 32）");
               }
             }
-          } else {
-            mark_busy_skip(fr_report, gate_ensure.str_busy_reason);
           }
-          if (fr_report.b_executed &&
-              fr_report.er_exec.e_outcome == ExecuteResult::Outcome::kSuccess) {
-            fr_report.u8_disk_size =
-                query_disk_usage(fr_report.str_long_path,
-                                 fr_report.u8_logical_size);
-          }
-          if (fr_report.b_executed &&
-              fr_report.er_exec.e_outcome == ExecuteResult::Outcome::kError) {
-            ++pl_result.i4_failures;
-          }
-          break;
-        }
-        case Plan::Action::kUncompress: {
-          if (!fn_uncompress) {
-            fr_report.str_error = L"解压器未接线";
-            ++pl_result.i4_failures;
-            break;
-          }
-          ReleaseGate gate_ensure{
-              ensure_released(fr_report.str_long_path, fn_release)};
-          if (gate_ensure.b_busy) {
-            mark_busy_skip(fr_report, gate_ensure.str_busy_reason);
-            break;
-          }
+        } else {
           append_released(fr_report.vec_released, gate_ensure.vec_released);
-          const std::expected<void, std::wstring> xe_uncompress{
-              fn_uncompress(fr_report.str_long_path)};
-          fr_report.b_executed = true;
-          if (!xe_uncompress.has_value()) {
-            fr_report.str_error = xe_uncompress.error();
-            ++pl_result.i4_failures;
-          }
+          mark_busy_skip(fr_report, gate_ensure.str_busy_reason);
+        }
+        if (fr_report.b_executed &&
+            fr_report.er_exec.e_outcome == ExecuteResult::Outcome::kSuccess) {
+          fr_report.u8_disk_size =
+              query_disk_usage(fr_report.str_long_path,
+                               fr_report.u8_logical_size);
+        }
+        if (fr_report.b_executed &&
+            fr_report.er_exec.e_outcome == ExecuteResult::Outcome::kError) {
+          ++pl_result.i4_failures;
+        }
+        break;
+      }
+      case Plan::Action::kUncompress: {
+        if (!fn_uncompress) {
+          fr_report.str_error = L"解压器未接线";
+          ++pl_result.i4_failures;
           break;
         }
-        case Plan::Action::kSkip:
+        ReleaseGate gate_ensure{
+            ensure_released(fr_report.str_long_path, fn_release)};
+        if (gate_ensure.b_busy) {
+          append_released(fr_report.vec_released, gate_ensure.vec_released);
+          mark_busy_skip(fr_report, gate_ensure.str_busy_reason);
           break;
+        }
+        append_released(fr_report.vec_released, gate_ensure.vec_released);
+        const std::expected<void, std::wstring> xe_uncompress{
+            fn_uncompress(fr_report.str_long_path)};
+        fr_report.b_executed = true;
+        if (!xe_uncompress.has_value()) {
+          fr_report.str_error = xe_uncompress.error();
+          ++pl_result.i4_failures;
+        }
+        break;
       }
-      emit_report(fr_report, opt_options, f_out, f_err);
+      case Plan::Action::kSkip:
+        break;
     }
+    pl_result.vec_reports.push_back(fr_report);
+    emit_report(fr_report, opt_options, f_out, f_err);
+  }
+
+  for (const ScanError& se_error : so_scan.vec_errors) {
+    FileReport fr_report{make_scan_error_report(se_error)};
+    ++pl_result.i4_failures;
+    pl_result.vec_reports.push_back(fr_report);
+    emit_report(fr_report, opt_options, f_out, f_err);
   }
 
   collect_byte_stats(pl_result);
 
-  if (opt_options.b_dry_run) {
-    for (const FileReport& fr_report : pl_result.vec_reports) {
-      emit_report(fr_report, opt_options, f_out, f_err);
-    }
-  }
   write_utf8(f_out, format_summary(pl_result, opt_options) + L"\n");
-  return pl_result.i4_failures > 0 ? 1 : 0;
+  if (bs_boundary.b_interrupted) {
+    std::wstring str_note{
+        b_scan_interrupted || opt_options.b_dry_run
+            ? std::wstring{L"已被 Ctrl+C 中断：停止扫描"}
+            : L"已被 Ctrl+C 中断：停止于 " + bs_boundary.str_stop_path};
+    write_utf8(f_out, str_note + L"\n");
+  }
+  return bs_boundary.b_interrupted ? static_cast<int>(kExitInterrupted)
+                                   : (pl_result.i4_failures > 0 ? 1 : 0);
 }
 
 }

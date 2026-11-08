@@ -24,6 +24,16 @@ int wmain(int argc, wchar_t** argv) {
     return 2;
   }
 
+  auto xe_interrupt{ntfscompact::install_interrupt_handler()};
+  if (!xe_interrupt.has_value()) {
+    ntfscompact::write_utf8(stderr,
+                            L"ntfscompact: " + std::move(xe_interrupt).error() +
+                                L"\n");
+    return 1;
+  }
+  const ntfscompact::InterruptWiring wiring_interrupt{
+      std::move(xe_interrupt).value()};
+
   auto xe_detector{ntfscompact::make_real_detector()};
   if (!xe_detector.has_value()) {
     ntfscompact::write_utf8(stderr,
@@ -51,7 +61,8 @@ int wmain(int argc, wchar_t** argv) {
   ntfscompact::UncompressFn fn_uncompress{std::move(xe_uncompressor).value()};
   ntfscompact::ReleaseFn fn_release{};
   if (!pr_parse.opt_options.b_dry_run) {
-    auto xe_releaser{ntfscompact::make_real_releaser()};
+    auto xe_releaser{
+        ntfscompact::make_real_releaser(pr_parse.opt_options.b_force_close_all)};
     if (!xe_releaser.has_value()) {
       ntfscompact::write_utf8(
           stderr, L"ntfscompact: " + std::move(xe_releaser).error() + L"\n");
@@ -59,6 +70,22 @@ int wmain(int argc, wchar_t** argv) {
     }
     fn_release = std::move(xe_releaser).value();
   }
-  return ntfscompact::run_pipeline(pr_parse.opt_options, fn_detect, fn_execute,
-                                   fn_uncompress, fn_release, stdout, stderr);
+  ntfscompact::DirFlagFn fn_dir_flag{};
+  if (!pr_parse.opt_options.b_dry_run) {
+    auto xe_dir_flag_clearer{ntfscompact::make_real_dir_flag_clearer()};
+    if (!xe_dir_flag_clearer.has_value()) {
+      ntfscompact::write_utf8(stderr, L"ntfscompact: " +
+                                          std::move(xe_dir_flag_clearer).error() +
+                                          L"\n");
+      return 1;
+    }
+    fn_dir_flag = std::move(xe_dir_flag_clearer).value();
+  }
+  const int i4_exit{ntfscompact::run_pipeline(
+      pr_parse.opt_options, fn_detect, fn_execute, fn_uncompress, fn_release,
+      fn_dir_flag, stdout, stderr, wiring_interrupt.fn_poll)};
+  if (wiring_interrupt.fn_wrapup_complete) {
+    wiring_interrupt.fn_wrapup_complete();
+  }
+  return i4_exit;
 }
