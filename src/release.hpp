@@ -2,6 +2,8 @@
 
 import std;
 
+#include "dynload.hpp"
+
 namespace ntfscompact {
 
 struct ClosedProcess {
@@ -68,5 +70,8 @@ std::expected<ReleaseFn, std::wstring> make_rm_force_level();
 
 std::expected<ReleaseFn, std::wstring> make_real_releaser(
     bool b_force_close_all = false);
+
+std::expected<ReleaseFn, std::wstring> make_real_releaser(
+    bool b_force_close_all, std::expected<RstrtmgrApi, std::wstring> xe_rm);
 
 }

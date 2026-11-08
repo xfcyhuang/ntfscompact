@@ -1,7 +1,6 @@
 #include "release.hpp"
 
 #include "handle_guard.hpp"
-#include "wof_util.hpp"
 
 #include <windows.h>
 
@@ -86,9 +85,6 @@ ProcessRisk classify_process_risk(const std::wstring& str_process_name) {
 
 namespace {
 
-using NtQuerySystemInformationPtr =
-    LONG(WINAPI*)(ULONG, PVOID, ULONG, PULONG);
-
 constexpr ULONG kSystemExtendedHandleInformationClass{64};
 constexpr LONG kNtStatusInfoLengthMismatch{static_cast<LONG>(0xC0000004u)};
 constexpr std::size_t kHandleSnapshotInitialSlots{1u << 19};
@@ -107,17 +103,12 @@ struct SystemHandleEntryEx {
 
 std::expected<std::vector<SystemHandleEntryEx>, std::wstring>
 snapshot_system_handles() {
-  HMODULE h_ntdll{LoadLibraryW(L"ntdll.dll")};
-  if (h_ntdll == nullptr) {
-    return std::unexpected(std::format(
-        L"无法加载 ntdll.dll（错误码 {}）：句柄枚举不可用", GetLastError()));
+  auto xe_ntdll{load_ntdll_api()};
+  if (!xe_ntdll.has_value()) {
+    return std::unexpected(std::move(xe_ntdll).error());
   }
-  HmoduleGuard guard_module{h_ntdll};
-  const auto fn_query{reinterpret_cast<NtQuerySystemInformationPtr>(
-      GetProcAddress(h_ntdll, "NtQuerySystemInformation"))};
-  if (fn_query == nullptr) {
-    return std::unexpected(L"ntdll.dll 缺少 NtQuerySystemInformation 导出");
-  }
+  const std::function<LONG WINAPI(ULONG, PVOID, ULONG, PULONG)> fn_query{
+      std::move(xe_ntdll).value().fn_query_system_information};
   std::vector<std::uintptr_t> vec_slots(kHandleSnapshotInitialSlots, 0);
   for (;;) {
     ULONG u4_returned{0};
@@ -474,64 +465,24 @@ ReleaseOutcome run_release_chain(const std::vector<ReleaseFn>& vec_levels,
 constexpr DWORD kRmForceShutdownFlag{0x1};
 constexpr DWORD kRmSessionKeyChars{32};
 
-struct RmUniqueProcess {
-  DWORD u4_pid{0};
-  FILETIME ft_start{};
-};
-
-struct RmProcessInfo {
-  RmUniqueProcess up_process{};
-  wchar_t arr_app_name[256]{};
-  wchar_t arr_service_name[64]{};
-  DWORD u4_app_type{0};
-  ULONG u4_app_status{0};
-  DWORD u4_ts_session_id{0};
-  BOOL b_restartable{FALSE};
-};
-
-using RmStartSessionPtr = DWORD(WINAPI*)(DWORD*, DWORD, wchar_t*);
-using RmRegisterResourcesPtr =
-    DWORD(WINAPI*)(DWORD, UINT, const wchar_t**, UINT, const RmUniqueProcess*,
-                   UINT, const wchar_t**);
-using RmGetListPtr = DWORD(WINAPI*)(DWORD, UINT*, UINT*, RmProcessInfo*, DWORD*);
-using RmStatusCallbackPtr = DWORD(WINAPI*)(DWORD);
-using RmShutdownPtr = DWORD(WINAPI*)(DWORD, ULONG, RmStatusCallbackPtr);
-using RmEndSessionPtr = DWORD(WINAPI*)(DWORD);
-
 struct RmContext {
-  HmoduleGuard guard_module{};
-  RmStartSessionPtr fn_start{nullptr};
-  RmRegisterResourcesPtr fn_register{nullptr};
-  RmGetListPtr fn_get_list{nullptr};
-  RmShutdownPtr fn_shutdown{nullptr};
-  RmEndSessionPtr fn_end{nullptr};
+  std::function<DWORD WINAPI(DWORD*, DWORD, wchar_t*)> fn_start{};
+  std::function<DWORD WINAPI(DWORD, UINT, const wchar_t**, UINT,
+                             const RmUniqueProcess*, UINT, const wchar_t**)>
+      fn_register{};
+  std::function<DWORD WINAPI(DWORD, UINT*, UINT*, RmProcessInfo*, DWORD*)>
+      fn_get_list{};
+  std::function<DWORD WINAPI(DWORD, ULONG, DWORD(WINAPI*)(DWORD))> fn_shutdown{};
+  std::function<DWORD WINAPI(DWORD)> fn_end{};
 };
 
-std::expected<RmContext, std::wstring> make_rm_context() {
-  HMODULE h_module{LoadLibraryW(L"rstrtmgr.dll")};
-  if (h_module == nullptr) {
-    return std::unexpected(std::format(
-        L"无法加载 rstrtmgr.dll（错误码 {}）：占用释放不可用，工具终止",
-        GetLastError()));
-  }
+RmContext make_rm_context(const RstrtmgrApi& api_rm) {
   RmContext ctx_rm{};
-  ctx_rm.guard_module = HmoduleGuard{h_module};
-  ctx_rm.fn_start =
-      reinterpret_cast<RmStartSessionPtr>(GetProcAddress(h_module, "RmStartSession"));
-  ctx_rm.fn_register = reinterpret_cast<RmRegisterResourcesPtr>(
-      GetProcAddress(h_module, "RmRegisterResources"));
-  ctx_rm.fn_get_list =
-      reinterpret_cast<RmGetListPtr>(GetProcAddress(h_module, "RmGetList"));
-  ctx_rm.fn_shutdown =
-      reinterpret_cast<RmShutdownPtr>(GetProcAddress(h_module, "RmShutdown"));
-  ctx_rm.fn_end =
-      reinterpret_cast<RmEndSessionPtr>(GetProcAddress(h_module, "RmEndSession"));
-  if (ctx_rm.fn_start == nullptr || ctx_rm.fn_register == nullptr ||
-      ctx_rm.fn_get_list == nullptr || ctx_rm.fn_shutdown == nullptr ||
-      ctx_rm.fn_end == nullptr) {
-    return std::unexpected(std::format(
-        L"rstrtmgr.dll 缺少 Restart Manager 导出（错误码 {}）", GetLastError()));
-  }
+  ctx_rm.fn_start = api_rm.fn_start_session;
+  ctx_rm.fn_register = api_rm.fn_register_resources;
+  ctx_rm.fn_get_list = api_rm.fn_get_list;
+  ctx_rm.fn_shutdown = api_rm.fn_shutdown;
+  ctx_rm.fn_end = api_rm.fn_end_session;
   return ctx_rm;
 }
 
@@ -602,7 +553,7 @@ ReleaseOutcome rm_shutdown_level(const RmContext& ctx_rm, bool b_force,
   }
   u4_err = ctx_rm.fn_shutdown(
       u4_session, b_force ? kRmForceShutdownFlag : 0,
-      static_cast<RmStatusCallbackPtr>(nullptr));
+      static_cast<DWORD(WINAPI*)(DWORD)>(nullptr));
   const std::vector<ClosedProcess> vec_closed{listed_processes(vec_apps, u4_count)};
   ctx_rm.fn_end(u4_session);
   if (u4_err != ERROR_SUCCESS) {
@@ -771,11 +722,12 @@ std::wstring release_audit_entry(const ReleaseOutcome& ro_outcome) {
 }
 
 std::expected<ReleaseFn, std::wstring> make_rm_shutdown_level(bool b_force) {
-  auto xe_ctx{make_rm_context()};
-  if (!xe_ctx.has_value()) {
-    return std::unexpected(std::move(xe_ctx).error());
+  auto xe_api{load_rstrtmgr_api()};
+  if (!xe_api.has_value()) {
+    return std::unexpected(std::move(xe_api).error());
   }
-  const auto sp_ctx{std::make_shared<const RmContext>(std::move(xe_ctx).value())};
+  const auto sp_ctx{std::make_shared<const RmContext>(
+      make_rm_context(std::move(xe_api).value()))};
   return make_rm_shutdown_level(sp_ctx, b_force);
 }
 
@@ -789,19 +741,35 @@ std::expected<ReleaseFn, std::wstring> make_rm_force_level() {
 
 std::expected<ReleaseFn, std::wstring> make_real_releaser(
     bool b_force_close_all) {
-  auto xe_graceful{make_rm_graceful_level()};
-  if (!xe_graceful.has_value()) {
-    return xe_graceful;
+  return make_real_releaser(b_force_close_all, load_rstrtmgr_api());
+}
+
+std::expected<ReleaseFn, std::wstring> make_real_releaser(
+    bool b_force_close_all, std::expected<RstrtmgrApi, std::wstring> xe_rm) {
+  const bool b_rm_available{xe_rm.has_value()};
+  std::vector<ReleaseFn> vec_levels{};
+  vec_levels.push_back(make_oplock_level());
+  if (b_rm_available) {
+    const auto sp_ctx{std::make_shared<const RmContext>(
+        make_rm_context(std::move(xe_rm).value()))};
+    vec_levels.push_back(make_rm_shutdown_level(sp_ctx, false));
+    vec_levels.push_back(make_rm_shutdown_level(sp_ctx, true));
   }
-  auto xe_force{make_rm_force_level()};
-  if (!xe_force.has_value()) {
-    return xe_force;
+  vec_levels.push_back(make_handle_force_level(b_force_close_all));
+  auto xe_chain{
+      make_escalating_releaser(std::move(vec_levels), EscalationBackoff{})};
+  if (!xe_chain.has_value() || b_rm_available) {
+    return xe_chain;
   }
-  return make_escalating_releaser(
-      {make_oplock_level(), std::move(xe_graceful).value(),
-       std::move(xe_force).value(),
-       make_handle_force_level(b_force_close_all)},
-      EscalationBackoff{});
+  ReleaseFn fn_chain{std::move(xe_chain).value()};
+  return ReleaseFn{[fn_chain = std::move(fn_chain)](
+                       const std::wstring& str_long_path) {
+    ReleaseOutcome ro_outcome{fn_chain(str_long_path)};
+    if (ro_outcome.e_status == ReleaseOutcome::Status::kBusy) {
+      ro_outcome.str_detail += L"（RM 不可用已跳过）";
+    }
+    return ro_outcome;
+  }};
 }
 
 }
