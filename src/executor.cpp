@@ -1,6 +1,7 @@
 #include "executor.hpp"
 
 #include "attr_guard.hpp"
+#include "dynload.hpp"
 #include "handle_guard.hpp"
 #include "wof_util.hpp"
 
@@ -24,7 +25,6 @@ constexpr int kTransientRetryMax{10};
 constexpr DWORD kTransientRetryDelayMs{50};
 
 struct ExecutorContext {
-  HmoduleGuard guard_module{};
   std::function<ULONG WINAPI(HANDLE, ULONG, PVOID, ULONG)>
       fn_set_data_location{};
   std::function<ULONG WINAPI(LPCWSTR, PBOOL, PULONG, PVOID, PULONG)>
@@ -214,31 +214,26 @@ ExecuteResult execute_one(const ExecutorContext& ctx_execute,
 
 }
 
-std::expected<ExecuteFn, std::wstring> make_real_executor() {
-  auto xe_module{load_wofutil_module()};
-  if (!xe_module.has_value()) {
+std::expected<ExecuteFn, std::wstring> make_real_executor(
+    std::expected<WofApi, std::wstring> xe_api) {
+  if (!xe_api.has_value()) {
     return std::unexpected(std::format(
-        L"无法加载 wofutil.dll（错误码 {}）：WOF 压缩不可用，工具终止",
-        std::move(xe_module).error()));
+        L"{}：WOF 压缩不可用，工具终止", std::move(xe_api).error()));
   }
-  HmoduleGuard guard_module{std::move(xe_module).value()};
-  FARPROC ptr_set{GetProcAddress(guard_module.get(), "WofSetFileDataLocation")};
-  FARPROC ptr_is{GetProcAddress(guard_module.get(), "WofIsExternalFile")};
-  if (ptr_set == nullptr || ptr_is == nullptr) {
-    return std::unexpected(std::format(
-        L"wofutil.dll 缺少 WOF 压缩导出（错误码 {}）", GetLastError()));
-  }
+  WofApi api_wof{std::move(xe_api).value()};
   auto sp_ctx{std::make_shared<ExecutorContext>()};
-  sp_ctx->fn_set_data_location =
-      reinterpret_cast<WofSetFileDataLocationPtr>(ptr_set);
-  sp_ctx->fn_is_external = reinterpret_cast<WofIsExternalFilePtr>(ptr_is);
-  sp_ctx->guard_module = std::move(guard_module);
+  sp_ctx->fn_set_data_location = api_wof.fn_set_data_location;
+  sp_ctx->fn_is_external = api_wof.fn_is_external;
   return ExecuteFn{[sp_ctx = std::move(sp_ctx)](
                        const std::wstring& str_long_path,
                        Plan::Action e_action, const CurrentState& cs_current,
                        Algorithm e_target) {
     return execute_one(*sp_ctx, str_long_path, e_action, cs_current, e_target);
   }};
+}
+
+std::expected<ExecuteFn, std::wstring> make_real_executor() {
+  return make_real_executor(load_wof_api());
 }
 
 }

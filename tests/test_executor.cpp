@@ -151,6 +151,16 @@ TEST_CASE("make_real_executor：wofutil.dll 动态加载成功") {
   CHECK(xe_executor.value());
 }
 
+TEST_CASE("make_real_executor：wofutil 加载失败注入 → unexpected 上抛启动即败") {
+  auto xe_executor{make_real_executor(std::unexpected(
+      std::wstring{L"无法加载 wofutil.dll（错误码 126）"}))};
+  REQUIRE_FALSE(xe_executor.has_value());
+  const std::string str_error{narrow(xe_executor.error())};
+  CHECK(str_error.find("wofutil.dll") != std::string::npos);
+  CHECK(str_error.find("WOF 压缩不可用") != std::string::npos);
+  CHECK(str_error.find("工具终止") != std::string::npos);
+}
+
 TEST_CASE("普通文件压缩后 WofIsExternalFile 报告指定算法") {
   ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
   REQUIRE(tmp_dir->b_ok);

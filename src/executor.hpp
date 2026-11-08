@@ -4,6 +4,7 @@ import std;
 
 #include "cli.hpp"
 #include "detect.hpp"
+#include "dynload.hpp"
 
 namespace ntfscompact {
 
@@ -20,6 +21,9 @@ using ExecuteFn = std::function<ExecuteResult(const std::wstring& str_long_path,
                                               Algorithm e_target)>;
 
 std::expected<ExecuteFn, std::wstring> make_real_executor();
+
+std::expected<ExecuteFn, std::wstring> make_real_executor(
+    std::expected<WofApi, std::wstring> xe_api);
 
 std::wstring check_compression_meets_target(const CurrentState& cs_actual,
                                             Algorithm e_target);

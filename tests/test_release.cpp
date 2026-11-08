@@ -895,6 +895,62 @@ TEST_CASE("make_real_releaser：空闲文件不进链且开关参数可传导") 
   CHECK(ro_outcome.e_status == ntfscompact::ReleaseOutcome::Status::kFree);
 }
 
+TEST_CASE("make_real_releaser：rstrtmgr 加载失败注入 → 构造成功且链降级为两级，链尽如实报 RM 不可用已跳过") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  const std::wstring str_file{ntfscompact_test::temp_long_api_path(
+      ntfscompact_test::temp_sub(tmp_dir, L"held.bin"))};
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"held.bin", 8192));
+  HANDLE h_lock{CreateFileW(str_file.c_str(), GENERIC_READ, 0, nullptr,
+                            OPEN_EXISTING, 0, nullptr)};
+  REQUIRE(h_lock != INVALID_HANDLE_VALUE);
+
+  const auto xe_releaser{ntfscompact::make_real_releaser(
+      false,
+      std::unexpected(std::wstring{L"无法加载 rstrtmgr.dll（错误码 126）"}))};
+  REQUIRE(xe_releaser.has_value());
+  const ntfscompact::ReleaseOutcome ro_outcome{xe_releaser.value()(str_file)};
+  CloseHandle(h_lock);
+
+  CHECK(ro_outcome.e_status == ntfscompact::ReleaseOutcome::Status::kBusy);
+  CHECK(ro_outcome.e_level == ntfscompact::ReleaseOutcome::Level::kHandle);
+  CHECK(has(narrow(ro_outcome.str_detail), "升级链尽后仍被占用"));
+  CHECK(has(narrow(ro_outcome.str_detail), "RM 不可用已跳过"));
+  CHECK(narrow(ro_outcome.str_detail).find("RM 优雅关") == std::string::npos);
+  CHECK(narrow(ro_outcome.str_detail).find("RM 强制关") == std::string::npos);
+}
+
+TEST_CASE("make_real_releaser：rstrtmgr 加载失败注入 → 空闲文件照常 kFree 且成功路径不多话") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  const std::wstring str_file{ntfscompact_test::temp_long_api_path(
+      ntfscompact_test::temp_sub(tmp_dir, L"free.bin"))};
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"free.bin", 8192));
+
+  const auto xe_releaser{ntfscompact::make_real_releaser(
+      false,
+      std::unexpected(std::wstring{L"无法加载 rstrtmgr.dll（错误码 126）"}))};
+  REQUIRE(xe_releaser.has_value());
+  const ntfscompact::ReleaseOutcome ro_outcome{xe_releaser.value()(str_file)};
+  CHECK(ro_outcome.e_status == ntfscompact::ReleaseOutcome::Status::kFree);
+  CHECK(ro_outcome.str_detail.empty());
+}
+
+TEST_CASE("make_real_releaser：rstrtmgr 产物注入成功 → RM 两级入链且链尽不多话") {
+  ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
+  REQUIRE(tmp_dir->b_ok);
+  const std::wstring str_file{ntfscompact_test::temp_long_api_path(
+      ntfscompact_test::temp_sub(tmp_dir, L"free.bin"))};
+  REQUIRE(ntfscompact_test::temp_write_file(tmp_dir, L"free.bin", 8192));
+
+  const auto xe_releaser{ntfscompact::make_real_releaser(
+      false, ntfscompact::load_rstrtmgr_api())};
+  REQUIRE(xe_releaser.has_value());
+  const ntfscompact::ReleaseOutcome ro_outcome{xe_releaser.value()(str_file)};
+  CHECK(ro_outcome.e_status == ntfscompact::ReleaseOutcome::Status::kFree);
+  CHECK(ro_outcome.str_detail.empty());
+}
+
 TEST_CASE("run_pipeline：注入假释放后压缩继续") {
   ntfscompact_test::TempDir tmp_dir{ntfscompact_test::make_temp_dir()};
   REQUIRE(tmp_dir->b_ok);

@@ -3,6 +3,7 @@
 import std;
 
 #include "cli.hpp"
+#include "dynload.hpp"
 
 namespace ntfscompact {
 
@@ -25,6 +26,9 @@ struct DetectionResult {
 using DetectFn = std::function<DetectionResult(const std::wstring& str_long_path)>;
 
 [[nodiscard]] auto make_real_detector() -> std::expected<DetectFn, std::wstring>;
+
+[[nodiscard]] auto make_real_detector(std::expected<WofApi, std::wstring> xe_api)
+    -> std::expected<DetectFn, std::wstring>;
 
 struct Plan {
   enum class Action { kSkip, kCompress, kRecompress, kUncompress };
