@@ -15,7 +15,7 @@ add_compile_options(-Wall -Wextra -Wpedantic -Wno-reserved-module-identifier -ff
 add_link_options(-Wl,--gc-sections)
 
 # 解析层（及后续管线）作为静态库，供可执行文件与单元测试共用
-add_library(ntfscompact_core STATIC src/cli.cpp src/scan.cpp src/detector.cpp src/pipeline.cpp src/executor.cpp src/uncompress.cpp src/dir_flag.cpp src/release.cpp src/wof_util.cpp src/interrupt.cpp)
+add_library(ntfscompact_core STATIC src/cli.cpp src/scan.cpp src/detector.cpp src/pipeline.cpp src/executor.cpp src/uncompress.cpp src/dir_flag.cpp src/release.cpp src/wof_util.cpp src/dynload.cpp src/interrupt.cpp)
 target_include_directories(ntfscompact_core PUBLIC src)
 
 add_executable(ntfscompact src/main.cpp)
@@ -63,6 +63,10 @@ add_test(NAME executor_real COMMAND ntfscompact_executor_tests)
 add_executable(ntfscompact_release_tests tests/test_release.cpp)
 target_link_libraries(ntfscompact_release_tests PRIVATE ntfscompact_core)
 add_test(NAME release_real COMMAND ntfscompact_release_tests)
+
+add_executable(ntfscompact_dynload_tests tests/test_dynload.cpp)
+target_link_libraries(ntfscompact_dynload_tests PRIVATE ntfscompact_core)
+add_test(NAME dynload_real COMMAND ntfscompact_dynload_tests)
 
 add_executable(ntfscompact_hold tests/hold_app.cpp)
 target_link_options(ntfscompact_hold PRIVATE -municode -mwindows)
