@@ -55,27 +55,35 @@ inline std::wstring widen_export_name(std::string_view str_name) {
   return str_wide;
 }
 
-template <typename TApi, typename TMemberPtr>
+template <typename TMemberPtr>
+struct ExportBinding {
+  const char* ptr_export;
+  TMemberPtr ptr_member;
+};
+
+template <typename TApi, typename TBinding>
 bool bind_export(TApi& api, HMODULE h_module, const wchar_t* ptr_dll_name,
-                 const char* ptr_export, TMemberPtr ptr_member,
-                 std::wstring& str_error) {
-  FARPROC ptr_proc{GetProcAddress(h_module, ptr_export)};
+                 const TBinding& binding, std::wstring& str_error) {
+  FARPROC ptr_proc{GetProcAddress(h_module, binding.ptr_export)};
   if (ptr_proc == nullptr) {
     str_error = std::format(L"{} 缺少导出 {}", ptr_dll_name,
-                            widen_export_name(ptr_export));
+                            widen_export_name(binding.ptr_export));
     return false;
   }
-  api.*ptr_member = reinterpret_cast<
-      std::remove_reference_t<decltype(api.*ptr_member)>>(ptr_proc);
+  api.*binding.ptr_member = reinterpret_cast<
+      std::remove_reference_t<decltype(api.*binding.ptr_member)>>(ptr_proc);
   return true;
 }
 
-template <typename TApi, std::size_t TNameCount, typename... TMemberPtr>
+template <typename TApi, typename... TBindings>
 std::expected<TApi, std::wstring> load_dll_api(
     const wchar_t* ptr_dll_name,
-    const std::array<const char*, TNameCount>& arr_names,
-    const std::tuple<TMemberPtr...>& tup_members) {
-  static_assert(TNameCount == sizeof...(TMemberPtr));
+    const std::tuple<TBindings...>& tup_bindings) {
+  static_assert(
+      (std::is_same_v<TBindings,
+                      ExportBinding<decltype(TBindings::ptr_member)>> && ...));
+  static_assert(
+      (std::is_member_pointer_v<decltype(TBindings::ptr_member)> && ...));
   HMODULE h_module{LoadLibraryW(ptr_dll_name)};
   if (h_module == nullptr) {
     return std::unexpected(
@@ -84,10 +92,10 @@ std::expected<TApi, std::wstring> load_dll_api(
   TApi api{};
   std::wstring str_error{};
   const bool b_bound{[&]<std::size_t... TIs>(std::index_sequence<TIs...>) {
-    return (bind_export(api, h_module, ptr_dll_name, arr_names[TIs],
-                        std::get<TIs>(tup_members), str_error) &&
+    return (bind_export(api, h_module, ptr_dll_name,
+                        std::get<TIs>(tup_bindings), str_error) &&
             ...);
-  }(std::index_sequence_for<TMemberPtr...>{})};
+  }(std::index_sequence_for<TBindings...>{})};
   if (!b_bound) {
     return std::unexpected(std::move(str_error));
   }

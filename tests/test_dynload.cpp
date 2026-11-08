@@ -25,30 +25,31 @@ std::wstring own_exe_path() {
 }
 
 TEST_CASE("load_dll_api：DLL 不存在时报含 DLL 名的加载失败") {
-  constexpr std::array arr_names{"FakeExportT3"};
-  const auto tup_members{std::tuple{&FakeApi::fn_probe}};
+  const auto tup_bindings{std::tuple{
+      ntfscompact::ExportBinding{"FakeExportT3", &FakeApi::fn_probe}}};
   const auto xe_api{ntfscompact::load_dll_api<FakeApi>(
-      L"no-such-dll-t3.dll", arr_names, tup_members)};
+      L"no-such-dll-t3.dll", tup_bindings)};
   REQUIRE_FALSE(xe_api.has_value());
   CHECK(has(xe_api.error(), L"no-such-dll-t3.dll"));
 }
 
 TEST_CASE("load_dll_api：导出缺失时报含 DLL 名与缺失函数名") {
   const std::wstring str_exe{own_exe_path()};
-  constexpr std::array arr_names{"NoSuchExportT3"};
-  const auto tup_members{std::tuple{&FakeApi::fn_probe}};
+  const auto tup_bindings{std::tuple{
+      ntfscompact::ExportBinding{"NoSuchExportT3", &FakeApi::fn_probe}}};
   const auto xe_api{ntfscompact::load_dll_api<FakeApi>(
-      str_exe.c_str(), arr_names, tup_members)};
+      str_exe.c_str(), tup_bindings)};
   REQUIRE_FALSE(xe_api.has_value());
   CHECK(has(xe_api.error(), str_exe.c_str()));
   CHECK(has(xe_api.error(), L"NoSuchExportT3"));
 }
 
 TEST_CASE("load_dll_api：导出齐备时函数表填充成功") {
-  constexpr std::array arr_names{"GetCurrentProcessId"};
-  const auto tup_members{std::tuple{&FakeApi::fn_probe}};
+  const auto tup_bindings{std::tuple{
+      ntfscompact::ExportBinding{"GetCurrentProcessId",
+                                 &FakeApi::fn_probe}}};
   const auto xe_api{ntfscompact::load_dll_api<FakeApi>(
-      L"kernel32.dll", arr_names, tup_members)};
+      L"kernel32.dll", tup_bindings)};
   REQUIRE(xe_api.has_value());
   CHECK(xe_api.value().fn_probe != nullptr);
   CHECK(xe_api.value().fn_probe() == GetCurrentProcessId());
